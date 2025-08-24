@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NullFang - Document Classification</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --primary-color: #2c3e50;
+            --secondary-color: #34495e;
+            --accent-color: #3498db;
+            --text-color: #2c3e50;
+            --background-color: #f5f6fa;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-color);
+        }
+
+        .navbar {
+            background-color: var(--primary-color);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .navbar-brand {
+            color: white !important;
+            font-weight: bold;
+        }
+
+        .card {
+            border: none;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        .card-header {
+            background-color: var(--secondary-color);
+            color: white;
+            border-radius: 10px 10px 0 0 !important;
+        }
+
+        .btn-primary {
+            background-color: var(--accent-color);
+            border: none;
+        }
+
+        .btn-primary:hover {
+            background-color: #2980b9;
+        }
+
+        .document-list {
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .classification-panel {
+            position: sticky;
+            top: 20px;
+        }
+
+        .sensitivity-map {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+
+        .sensitivity-item {
+            padding: 1rem;
+            border-radius: 0.5rem;
+            color: white;
+            text-align: center;
+        }
+
+        .sensitivity-color {
+            width: 2rem;
+            height: 2rem;
+            border-radius: 50%;
+        }
+
+        .sensitivity-info {
+            flex: 1;
+        }
+
+        .sensitivity-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .table-responsive {
+            margin-top: 1rem;
+        }
+
+        .badge {
+            font-size: 0.875rem;
+            padding: 0.5em 0.75em;
+        }
+
+        .btn-group {
+            margin-bottom: 1rem;
+        }
+
+        .modal-dialog {
+            max-width: 600px;
+        }
+
+        .form-check {
+            margin-top: 0.5rem;
+        }
+
+        .priority-badge {
+            font-size: 0.75rem;
+            padding: 0.25em 0.5em;
+            border-radius: 0.25rem;
+        }
+
+        .priority-high {
+            background-color: #dc3545;
+            color: white;
+        }
+
+        .priority-medium {
+            background-color: #ffc107;
+            color: black;
+        }
+
+        .priority-low {
+            background-color: #28a745;
+            color: white;
+        }
+
+        .nav-link {
+            color: white !important;
+            opacity: 0.8;
+            transition: opacity 0.2s;
+        }
+
+        .nav-link:hover {
+            opacity: 1;
+        }
+
+        .nav-link.active {
+            opacity: 1;
+            font-weight: 500;
+        }
+
+        .table th {
+            background-color: var(--secondary-color);
+            color: white;
+        }
+
+        .modal-content {
+            border-radius: 10px;
+            border: none;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .modal-header {
+            background-color: var(--secondary-color);
+            color: white;
+            border-radius: 10px 10px 0 0;
+        }
+
+        .btn-close {
+            filter: brightness(0) invert(1);
+        }
+
+        /* Estilos para o seletor de domínio */
+        #domainSelector {
+            background-color: var(--secondary-color) !important;
+            color: white !important;
+            border: 1px solid #6c757d !important;
+            border-radius: 5px;
+            padding: 0.375rem 0.75rem;
+            font-size: 0.875rem;
+            transition: all 0.2s ease-in-out;
+        }
+
+        #domainSelector:hover {
+            background-color: #495057 !important;
+            border-color: #adb5bd !important;
+        }
+
+        #domainSelector:focus {
+            background-color: var(--secondary-color) !important;
+            border-color: var(--accent-color) !important;
+            box-shadow: 0 0 0 0.2rem rgba(52, 152, 219, 0.25);
+        }
+
+        #domainSelector option {
+            background-color: var(--secondary-color);
+            color: white;
+        }
+
+        .navbar-nav .nav-item {
+            display: flex;
+            align-items: center;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">NullFang</a>
+            
+            <!-- Seletor de Domínio -->
+            <div class="navbar-nav me-auto">
+                <div class="nav-item dropdown">
+                    <select class="form-select form-select-sm" id="domainSelector" style="background-color: var(--secondary-color); color: white; border: 1px solid #6c757d; min-width: 200px;">
+                        <option value="">Loading domains...</option>
+                    </select>
+                </div>
+            </div>
+            
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" onclick="navigate('/')">Home</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" onclick="navigate('/documents')">Documents</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" onclick="navigate('/analysis')">Analysis</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" onclick="navigate('/settings')">Settings</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" onclick="navigate('/suggestions')">Suggestions</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" onclick="navigate('/infrastructure')">Infrastructure</a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <div id="mainContent">
+            <!-- O conteúdo será carregado dinamicamente aqui -->
+        </div>
+    </div>
+
+    <!-- Modal de Classificação -->
+    <div class="modal fade" id="classificationModal" tabindex="-1" aria-labelledby="classificationModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="classificationModalLabel">Classify Document</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="classificationSelect" class="form-label">Classification</label>
+                        <select class="form-select" id="classificationSelect" required>
+                            <option value="">Select a classification...</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="classificationNotes" class="form-label">Notes</label>
+                        <textarea class="form-control" id="classificationNotes" rows="3"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="applyClassification()">Apply</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.js"></script>
+    <script src="router.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</body>
+</html> 
