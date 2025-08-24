@@ -3,5 +3,5 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/m0ng3sh3ll/NullFang/wiki"><strong>📚 Full Wiki Documentation</strong></a>
+  <a href="https://nullfang.gitbook.io/nullfang"><strong>📚 Full Wiki Documentation</strong></a>
 </p>
