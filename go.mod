@@ -2,15 +2,13 @@ module github.com/m0ng3sh3ll/NullFang
 
 go 1.24.2
 
-replace github.com/hirochachacha/go-smb2 => ./go-smb2-patch
-
 require (
+	github.com/m0ng3sh3ll/NullFang/go-smb2-patch v0.0.0
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.5
 	github.com/edsrzf/mmap-go v1.2.0
 	github.com/gin-gonic/gin v1.10.1
 	github.com/hashicorp/golang-lru v1.0.2
-	github.com/hirochachacha/go-smb2 v0.0.0-00010101000000-000000000000
 	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/mattn/go-sqlite3 v1.14.28
 	github.com/sahilm/fuzzy v0.1.1
