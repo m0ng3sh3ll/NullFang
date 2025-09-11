@@ -9,7 +9,7 @@ import (
 
 	"testing"
 
-	"github.com/hirochachacha/go-smb2/internal/utf16le"
+	"github.com/m0ng3sh3ll/NullFang/go-smb2-patch/internal/utf16le"
 )
 
 func TestNtowfv2(t *testing.T) {

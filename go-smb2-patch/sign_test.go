@@ -5,9 +5,9 @@ import (
 	"crypto/aes"
 	"encoding/hex"
 
-	"github.com/hirochachacha/go-smb2/internal/crypto/cmac"
+	"github.com/m0ng3sh3ll/NullFang/go-smb2-patch/internal/crypto/cmac"
 
-	. "github.com/hirochachacha/go-smb2/internal/smb2"
+	. "github.com/m0ng3sh3ll/NullFang/go-smb2-patch/internal/smb2"
 
 	"testing"
 )
