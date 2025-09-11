@@ -1,4 +1,4 @@
-module github.com/hirochachacha/go-smb2
+module github.com/m0ng3sh3ll/NullFang/go-smb2-patch
 
 go 1.12
 

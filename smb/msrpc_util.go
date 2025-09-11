@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/hirochachacha/go-smb2"
+	"github.com/m0ng3sh3ll/NullFang/go-smb2-patch"
 )
 
 // GetRemoteHostnameSRVSVC faz uma chamada NetServerGetInfo via SRVSVC para obter o NetBIOS name real do host

@@ -18,11 +18,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/hirochachacha/go-smb2"
 	"github.com/m0ng3sh3ll/NullFang/auth"
 	"github.com/m0ng3sh3ll/NullFang/checkpoint"
 	copyutil "github.com/m0ng3sh3ll/NullFang/copy"
 	"github.com/m0ng3sh3ll/NullFang/database"
+	"github.com/m0ng3sh3ll/NullFang/go-smb2-patch"
 	"github.com/m0ng3sh3ll/NullFang/logger"
 	"github.com/m0ng3sh3ll/NullFang/scanner"
 	"github.com/m0ng3sh3ll/NullFang/search"

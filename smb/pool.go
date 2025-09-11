@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hirochachacha/go-smb2"
+	"github.com/m0ng3sh3ll/NullFang/go-smb2-patch"
 )
 
 // ConnectionPool gerencia um pool de conexões SMB

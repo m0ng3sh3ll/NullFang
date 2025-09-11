@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hirochachacha/go-smb2"
+	"github.com/m0ng3sh3ll/NullFang/go-smb2-patch"
 	"github.com/m0ng3sh3ll/NullFang/logger"
 	"github.com/m0ng3sh3ll/NullFang/scanner"
 )
