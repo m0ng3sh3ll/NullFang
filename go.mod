@@ -3,7 +3,6 @@ module github.com/m0ng3sh3ll/NullFang
 go 1.24.2
 
 require (
-	github.com/m0ng3sh3ll/NullFang/go-smb2-patch v1.1.0
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.9
 	github.com/edsrzf/mmap-go v1.2.0
