@@ -350,6 +350,11 @@ func DiscoverAndSaveShares(host, username, password string) (string, error) {
 // isPathWithinShare checks if a path is within the share root
 // This prevents traversal outside the share into system directories
 func isPathWithinShare(path string) bool {
+	// Allow root directory
+	if path == "." || path == "" {
+		return true
+	}
+
 	// Normalize path to use forward slashes
 	normalizedPath := filepath.ToSlash(path)
 
@@ -369,6 +374,81 @@ func isPathWithinShare(path string) bool {
 	}
 
 	return true
+}
+
+// cleanSMBName limpa APENAS caracteres de controle realmente problemáticos
+// Mantém o nome EXATAMENTE como vem do SMB para garantir correspondência
+// Remove apenas null bytes e caracteres de controle que podem causar problemas de encoding
+func cleanSMBName(name string) string {
+	// Se vazio, retornar como está
+	if name == "" {
+		return name
+	}
+
+	// Remover APENAS null bytes (0x00) e caracteres de controle extremos
+	// NÃO remover outros caracteres para manter correspondência com o servidor SMB
+	var cleaned strings.Builder
+	for _, r := range name {
+		// Remover apenas null bytes e caracteres de controle extremos (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F)
+		// Manter tab (0x09), newline (0x0A), carriage return (0x0D) e todos os outros caracteres
+		if r == 0x00 || (r >= 0x01 && r <= 0x08) || r == 0x0B || r == 0x0C || (r >= 0x0E && r <= 0x1F) {
+			continue // Pular apenas caracteres de controle extremos
+		}
+
+		// Manter TODOS os outros caracteres, incluindo espaços, acentos, ç, etc.
+		// O SMB já validou esses caracteres, então devemos mantê-los
+		cleaned.WriteRune(r)
+	}
+
+	result := cleaned.String()
+
+	// Se ficou vazio após remover null bytes, retornar o original
+	if result == "" {
+		return name
+	}
+
+	return result
+}
+
+// joinSMBPath constrói um caminho SMB corretamente usando \ como separador
+// e preservando o nome exatamente como vem do SMB (sem normalização que pode quebrar caracteres especiais)
+func joinSMBPath(elem ...string) string {
+	// Filtrar elementos vazios e limpar nomes
+	parts := make([]string, 0, len(elem))
+	for _, e := range elem {
+		if e != "" && e != "." {
+			// Limpar o nome antes de adicionar
+			cleaned := cleanSMBName(e)
+			if cleaned != "" && cleaned != "." {
+				parts = append(parts, cleaned)
+			}
+		}
+	}
+
+	if len(parts) == 0 {
+		return "."
+	}
+
+	// Se o primeiro elemento for ".", remover
+	if parts[0] == "." {
+		parts = parts[1:]
+		if len(parts) == 0 {
+			return "."
+		}
+	}
+
+	// Juntar usando \ (separador SMB)
+	result := strings.Join(parts, "\\")
+
+	// Garantir que não comece com \ (caminhos relativos no SMB não devem começar com \)
+	result = strings.TrimPrefix(result, "\\")
+
+	// Se ficou vazio, retornar "."
+	if result == "" {
+		return "."
+	}
+
+	return result
 }
 
 // DirCache implementation
@@ -439,7 +519,7 @@ func (cb *CircuitBreaker) recordFailure() {
 }
 
 // Helper functions
-func checkFilename(job *FileJob, results chan<- *SearchResult) {
+func checkFilename(ctx context.Context, job *FileJob, results chan<- *SearchResult) {
 	var filename string
 	if job.config.CaseSensitive {
 		filename = job.entry.Name()
@@ -449,19 +529,22 @@ func checkFilename(job *FileJob, results chan<- *SearchResult) {
 
 	for _, pattern := range job.config.FilenamePatterns {
 		if strings.Contains(filename, pattern) {
-			results <- &SearchResult{
+			if !sendResultSafely(ctx, results, &SearchResult{
 				ShareName:   normalizeShareName(job.shareName),
 				FilePath:    job.filePath,
 				MatchType:   "filename",
 				MatchValue:  pattern,
 				FileSize:    job.entry.Size(),
 				IsDirectory: false,
+			}) {
+				// Contexto cancelado, parar
+				return
 			}
 		}
 	}
 }
 
-func checkLine(job *FileJob, line string, lineNum int, results chan<- *SearchResult) {
+func checkLine(ctx context.Context, job *FileJob, line string, lineNum int, results chan<- *SearchResult) {
 	// Check content patterns
 	if job.config.SearchContents {
 		for _, pattern := range job.config.ContentPatterns {
@@ -476,13 +559,16 @@ func checkLine(job *FileJob, line string, lineNum int, results chan<- *SearchRes
 			}
 
 			if found {
-				results <- &SearchResult{
+				if !sendResultSafely(ctx, results, &SearchResult{
 					ShareName:   normalizeShareName(job.shareName),
 					FilePath:    job.filePath,
 					MatchType:   "content",
 					MatchValue:  fmt.Sprintf("%s (line %d)", pattern, lineNum),
 					FileSize:    job.entry.Size(),
 					IsDirectory: false,
+				}) {
+					// Contexto cancelado, parar
+					return
 				}
 			}
 		}
@@ -493,7 +579,7 @@ func checkLine(job *FileJob, line string, lineNum int, results chan<- *SearchRes
 		for _, regex := range job.config.RegexPatterns {
 			matches := regex.FindAllString(line, -1)
 			for _, match := range matches {
-				results <- &SearchResult{
+				if !sendResultSafely(ctx, results, &SearchResult{
 					ShareName:   normalizeShareName(job.shareName),
 					FilePath:    job.filePath,
 					MatchType:   "regex",
@@ -501,6 +587,9 @@ func checkLine(job *FileJob, line string, lineNum int, results chan<- *SearchRes
 					FileSize:    job.entry.Size(),
 					IsDirectory: false,
 					RegexMatch:  regex.String(),
+				}) {
+					// Contexto cancelado, parar
+					return
 				}
 			}
 		}
@@ -534,20 +623,73 @@ func openFileWithTimeout(ctx context.Context, fs *smb2.Share, path string, timeo
 
 func aggregateErrors(errChan chan error) error {
 	var errStrings []string
-	for err := range errChan {
-		if err != nil {
-			errStrings = append(errStrings, err.Error())
+	seenErrors := make(map[string]bool)
+
+	// Adicionar timeout para evitar travamento
+	timeout := time.After(30 * time.Second)
+
+	for {
+		select {
+		case err, ok := <-errChan:
+			if !ok {
+				// Canal fechado, sair
+				goto done
+			}
+			if err != nil {
+				errStr := err.Error()
+				if !seenErrors[errStr] {
+					seenErrors[errStr] = true
+					errStrings = append(errStrings, errStr)
+				}
+			}
+		case <-timeout:
+			// Timeout para evitar travamento
+			fmt.Printf("[WARN] Timeout waiting for errors. Proceeding with collected errors.\n")
+			goto done
 		}
 	}
 
+done:
 	if len(errStrings) > 0 {
 		return fmt.Errorf("multiple errors occurred: %s", strings.Join(errStrings, "; "))
 	}
 	return nil
 }
 
-// Cache global para diretórios já escaneados (thread-safe)
-var scannedDirs sync.Map
+// aggregateErrorsWithTimeout versão com timeout customizável
+func aggregateErrorsWithTimeout(errChan chan error, timeoutDuration time.Duration) error {
+	var errStrings []string
+	seenErrors := make(map[string]bool)
+
+	timeout := time.After(timeoutDuration)
+
+	for {
+		select {
+		case err, ok := <-errChan:
+			if !ok {
+				// Canal fechado, sair
+				goto done
+			}
+			if err != nil {
+				errStr := err.Error()
+				if !seenErrors[errStr] {
+					seenErrors[errStr] = true
+					errStrings = append(errStrings, errStr)
+				}
+			}
+		case <-timeout:
+			// Timeout para evitar travamento
+			fmt.Printf("[WARN] Timeout waiting for errors after %v. Proceeding with collected errors.\n", timeoutDuration)
+			goto done
+		}
+	}
+
+done:
+	if len(errStrings) > 0 {
+		return fmt.Errorf("multiple errors occurred: %s", strings.Join(errStrings, "; "))
+	}
+	return nil
+}
 
 var excludedDirs = []string{
 	"windows", "$windows.~bt", "system volume information", "program files", "programdata", "recycle.bin", "$Recycle.Bin", "Program Files (x86)", "Program Files", "$WinREAgent", "PerfLogs",
@@ -563,15 +705,45 @@ func shouldExcludeDir(dirName string) bool {
 	return false
 }
 
+// Cache local por share para evitar reprocessamento
+var processedDirs = make(map[string]map[string]bool)
+var failedDirs = make(map[string]map[string]bool) // Cache para diretórios que falharam
+var processedDirsMutex sync.RWMutex
+
 // searchDirectoryWithContext recursively searches a directory for files matching the search criteria
 // with context for timeout and depth tracking
 func searchDirectoryWithContext(ctx context.Context, fs *smb2.Share, shareName, dirPath string, config *SearchConfig, results chan<- *SearchResult, depth int, wp *WorkerPool, dc *DirCache) error {
-	// Cache global: evitar reprocessamento de diretórios
-	absPath := shareName + ":" + dirPath
-	if _, loaded := scannedDirs.LoadOrStore(absPath, true); loaded {
-		// Já processado, pular
-		return nil
+	// Normalizar o caminho para usar \ (separador SMB) em vez de / (separador do sistema)
+	// Isso garante que caminhos com caracteres especiais sejam tratados corretamente
+	if dirPath != "." && dirPath != "" {
+		dirPath = strings.ReplaceAll(dirPath, "/", "\\")
+		// Remover barras duplicadas
+		for strings.Contains(dirPath, "\\\\") {
+			dirPath = strings.ReplaceAll(dirPath, "\\\\", "\\")
+		}
+		// Remover barra inicial se houver (caminhos relativos no SMB não devem começar com \)
+		dirPath = strings.TrimPrefix(dirPath, "\\")
+		if dirPath == "" {
+			dirPath = "."
+		}
 	}
+
+	// Cache local por share: evitar reprocessamento
+	processedDirsMutex.RLock()
+	if _, exists := processedDirs[shareName]; exists {
+		if processedDirs[shareName][dirPath] {
+			processedDirsMutex.RUnlock()
+			return nil // Já processado
+		}
+	}
+	// Verificar se já falhou antes
+	if _, exists := failedDirs[shareName]; exists {
+		if failedDirs[shareName][dirPath] {
+			processedDirsMutex.RUnlock()
+			return nil // Já falhou antes, não tentar novamente
+		}
+	}
+	processedDirsMutex.RUnlock()
 
 	select {
 	case <-ctx.Done():
@@ -589,12 +761,22 @@ func searchDirectoryWithContext(ctx context.Context, fs *smb2.Share, shareName, 
 
 	// Try to get from cache first
 	if entries, ok := dc.Get(dirPath); ok {
+		// Marcar como processado apenas após sucesso
+		processedDirsMutex.Lock()
+		if processedDirs[shareName] == nil {
+			processedDirs[shareName] = make(map[string]bool)
+		}
+		processedDirs[shareName][dirPath] = true
+		processedDirsMutex.Unlock()
+
 		return processEntries(ctx, fs, shareName, dirPath, entries, config, results, depth, wp, dc)
 	}
 
 	// Read directory with retry
 	var entries []os.FileInfo
 	var lastErr error
+	var consecutiveTimeouts int
+
 	for attempt := 1; attempt <= 3; attempt++ {
 		entriesChan := make(chan []os.FileInfo, 1)
 		errChan := make(chan error, 1)
@@ -612,31 +794,114 @@ func searchDirectoryWithContext(ctx context.Context, fs *smb2.Share, shareName, 
 			return ctx.Err()
 		case err := <-errChan:
 			lastErr = err
+			consecutiveTimeouts = 0 // Reset timeout counter on non-timeout error
+
+			// Verificar se é erro "invalid parameter" - não adianta fazer retry
+			errStr := err.Error()
+			isInvalidParameter := strings.Contains(errStr, "invalid parameter") ||
+				strings.Contains(errStr, "STATUS_INVALID_PARAMETER") ||
+				strings.Contains(errStr, "An invalid parameter was passed")
+
+			if isInvalidParameter {
+				// Erro definitivo - marcar como falho e pular
+				if config.Verbose {
+					fmt.Printf("[WARN] Directory %s: %v (skipping - invalid parameter error)\n", dirPath, err)
+				}
+				processedDirsMutex.Lock()
+				if failedDirs[shareName] == nil {
+					failedDirs[shareName] = make(map[string]bool)
+				}
+				failedDirs[shareName][dirPath] = true
+				processedDirsMutex.Unlock()
+				return nil // Retorna nil para continuar processamento sem erro fatal
+			}
+
 			if attempt < 3 {
-				fmt.Printf("[WARN] Directory listing attempt %d failed: %v. Retrying in 2 seconds...\n", attempt, err)
+				if config.Verbose {
+					fmt.Printf("[WARN] Directory listing attempt %d failed: %v. Retrying in 2 seconds...\n", attempt, err)
+				}
 				time.Sleep(2 * time.Second)
 				continue
 			}
 			return err
 		case entries = <-entriesChan:
 			dc.Set(dirPath, entries) // Store in cache
-			break
+			// Marcar como processado apenas após sucesso
+			processedDirsMutex.Lock()
+			if processedDirs[shareName] == nil {
+				processedDirs[shareName] = make(map[string]bool)
+			}
+			processedDirs[shareName][dirPath] = true
+			processedDirsMutex.Unlock()
+			goto done
 		case <-time.After(30 * time.Second):
+			consecutiveTimeouts++
 			lastErr = fmt.Errorf("timeout reading directory %s", dirPath)
+
+			// Se for o diretório raiz e tiver muitos timeouts consecutivos, parar
+			if dirPath == "." && consecutiveTimeouts >= 2 {
+				fmt.Printf("[ERROR] Directory %s is consistently timing out. Skipping to avoid infinite loop.\n", dirPath)
+				// Marcar como falhou para não tentar novamente
+				processedDirsMutex.Lock()
+				if failedDirs[shareName] == nil {
+					failedDirs[shareName] = make(map[string]bool)
+				}
+				failedDirs[shareName][dirPath] = true
+				processedDirsMutex.Unlock()
+				return fmt.Errorf("directory %s consistently timing out", dirPath)
+			}
+
 			if attempt < 3 {
-				fmt.Printf("[WARN] Directory listing attempt %d timed out. Retrying in 2 seconds...\n", attempt)
+				if config.Verbose {
+					fmt.Printf("[WARN] Directory listing attempt %d timed out. Retrying in 2 seconds...\n", attempt)
+				}
 				time.Sleep(2 * time.Second)
 				continue
 			}
 			return lastErr
 		}
-		break
 	}
+done:
 	if entries == nil {
 		return lastErr
 	}
 
 	return processEntries(ctx, fs, shareName, dirPath, entries, config, results, depth, wp, dc)
+}
+
+// sendResultSafely envia um resultado para o canal de forma segura, verificando se o contexto foi cancelado
+// e capturando panic caso o canal esteja fechado
+func sendResultSafely(ctx context.Context, results chan<- *SearchResult, result *SearchResult) bool {
+	// Verificar se o contexto foi cancelado primeiro
+	select {
+	case <-ctx.Done():
+		// Contexto cancelado, não enviar
+		return false
+	default:
+		// Contexto ainda ativo, tentar enviar
+	}
+
+	// Tentar enviar com proteção contra panic (canal fechado)
+	var success bool
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Panic capturado - canal provavelmente fechado
+				success = false
+			}
+		}()
+
+		select {
+		case <-ctx.Done():
+			// Contexto cancelado durante a tentativa
+			success = false
+		case results <- result:
+			// Enviado com sucesso
+			success = true
+		}
+	}()
+
+	return success
 }
 
 func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath string, entries []os.FileInfo, config *SearchConfig, results chan<- *SearchResult, depth int, wp *WorkerPool, dc *DirCache) error {
@@ -652,7 +917,7 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 		default:
 		}
 
-		entryPath := filepath.Join(dirPath, entry.Name())
+		entryPath := joinSMBPath(dirPath, entry.Name())
 
 		// Checagem de exclusão de arquivos (flag -exclude)
 		if shouldExcludeFile(entryPath, config) {
@@ -668,13 +933,16 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 		if entry.IsDir() {
 			logger.Debug("[DEBUG] Found directory: %s", entryPath)
 			if config.Verbose {
-				results <- &SearchResult{
+				if !sendResultSafely(ctx, results, &SearchResult{
 					ShareName:   normalizeShareName(shareName),
 					FilePath:    entryPath,
 					MatchType:   "directory",
 					MatchValue:  "",
 					FileSize:    0,
 					IsDirectory: true,
+				}) {
+					// Contexto cancelado, parar processamento
+					return ctx.Err()
 				}
 			}
 
@@ -707,13 +975,16 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 						allowedExt = "." + allowedExt
 					}
 					if strings.EqualFold(ext, allowedExt) {
-						results <- &SearchResult{
+						if !sendResultSafely(ctx, results, &SearchResult{
 							ShareName:   normalizeShareName(shareName),
 							FilePath:    entryPath,
 							MatchType:   "extension",
 							MatchValue:  ext,
 							FileSize:    entry.Size(),
 							IsDirectory: false,
+						}) {
+							// Contexto cancelado, parar processamento
+							return ctx.Err()
 						}
 						break
 					}
@@ -746,13 +1017,16 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 					}
 				}
 				if addLargeFile {
-					results <- &SearchResult{
+					if !sendResultSafely(ctx, results, &SearchResult{
 						ShareName:   normalizeShareName(shareName),
 						FilePath:    entryPath,
 						MatchType:   "large_file",
 						MatchValue:  fmt.Sprintf("Large file: %.2f MB", float64(entry.Size())/(1024*1024)),
 						FileSize:    entry.Size(),
 						IsDirectory: false,
+					}) {
+						// Contexto cancelado, parar processamento
+						return ctx.Err()
 					}
 				}
 				continue
@@ -982,7 +1256,7 @@ const maxCacheFileSize = 1024 * 1024 // 1MB
 func processFile(ctx context.Context, job *FileJob, results chan<- *SearchResult, fileContentCache *scanner.FileContentCache) {
 	// Primeiro verificar nome do arquivo e extensão
 	if job.config.SearchFilenames {
-		checkFilename(job, results)
+		checkFilename(ctx, job, results)
 	}
 
 	// Se não vamos buscar conteúdo ou regex, retornar aqui
@@ -1045,7 +1319,7 @@ func processFile(ctx context.Context, job *FileJob, results chan<- *SearchResult
 						case <-ctx.Done():
 							return
 						default:
-							checkContent(job, bufScanner.Text(), results)
+							checkContent(ctx, job, bufScanner.Text(), results)
 						}
 					}
 					err = bufScanner.Err()
@@ -1066,7 +1340,7 @@ func processFile(ctx context.Context, job *FileJob, results chan<- *SearchResult
 			}
 			if fileScanner != nil {
 				err = fileScanner.Scan(func(content string) error {
-					checkContent(job, content, results)
+					checkContent(ctx, job, content, results)
 					return nil
 				})
 				if err != nil && job.config.ExtraVerbose {
@@ -1182,7 +1456,7 @@ func processFile(ctx context.Context, job *FileJob, results chan<- *SearchResult
 					case <-ctx.Done():
 						return
 					default:
-						checkContent(job, bufScanner.Text(), results)
+						checkContent(ctx, job, bufScanner.Text(), results)
 					}
 				}
 				err = bufScanner.Err()
@@ -1206,7 +1480,7 @@ func processFile(ctx context.Context, job *FileJob, results chan<- *SearchResult
 
 	// Usa o scanner apropriado
 	err = fileScanner.Scan(func(content string) error {
-		checkContent(job, content, results)
+		checkContent(ctx, job, content, results)
 		return nil
 	})
 
@@ -1215,7 +1489,7 @@ func processFile(ctx context.Context, job *FileJob, results chan<- *SearchResult
 	}
 }
 
-func checkContent(job *FileJob, content string, results chan<- *SearchResult) {
+func checkContent(ctx context.Context, job *FileJob, content string, results chan<- *SearchResult) {
 	if job.config.SearchContents {
 		for _, pattern := range job.config.ContentPatterns {
 			var found bool
@@ -1229,13 +1503,16 @@ func checkContent(job *FileJob, content string, results chan<- *SearchResult) {
 			}
 
 			if found {
-				results <- &SearchResult{
+				if !sendResultSafely(ctx, results, &SearchResult{
 					ShareName:   normalizeShareName(job.shareName),
 					FilePath:    job.filePath,
 					MatchType:   "content",
 					MatchValue:  pattern,
 					FileSize:    job.entry.Size(),
 					IsDirectory: false,
+				}) {
+					// Contexto cancelado, parar
+					return
 				}
 			}
 		}
@@ -1245,14 +1522,17 @@ func checkContent(job *FileJob, content string, results chan<- *SearchResult) {
 		for _, regex := range job.config.RegexPatterns {
 			match := regex.FindString(content)
 			if match != "" {
-				results <- &SearchResult{
+				if !sendResultSafely(ctx, results, &SearchResult{
 					ShareName:   normalizeShareName(job.shareName),
 					FilePath:    job.filePath,
 					MatchType:   "regex",
-					MatchValue:  content,
+					MatchValue:  match,
 					FileSize:    job.entry.Size(),
 					IsDirectory: false,
 					RegexMatch:  regex.String(),
+				}) {
+					// Contexto cancelado, parar
+					return
 				}
 			}
 		}
@@ -1438,6 +1718,9 @@ func SearchMultipleSharesStream(fs map[string]*smb2.Share, config *SearchConfig,
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(fs))
+	timeoutCount := 0
+	var errChanMutex sync.Mutex
+	errChanClosed := false
 
 	for shareName, share := range fs {
 		if config.SkipSpecialShares && isSpecialShare(shareName, config.ExcludedShares) {
@@ -1457,17 +1740,54 @@ func SearchMultipleSharesStream(fs map[string]*smb2.Share, config *SearchConfig,
 				if config.Verbose {
 					logger.Debug("Failed to search share %s: %v", name, err)
 				}
-				errChan <- err
+				// Contar timeouts consecutivos
+				if strings.Contains(err.Error(), "directory . consistently timing out") {
+					timeoutCount++
+				}
+
+				// Proteger envio no canal
+				errChanMutex.Lock()
+				if !errChanClosed {
+					select {
+					case errChan <- err:
+					default:
+						// Canal cheio, ignorar erro
+					}
+				}
+				errChanMutex.Unlock()
 			}
 		}(shareName, share)
 	}
 
-	// Fechar o canal de resultados só depois de todas as goroutines terminarem
+	// Aguardar com timeout para evitar travamento
+	done := make(chan struct{})
 	go func() {
 		wg.Wait()
-		logger.Debug("[DEBUG] Closing error channel in SearchMultipleSharesStream")
-		close(errChan)
+		close(done)
 	}()
 
-	return aggregateErrors(errChan)
+	select {
+	case <-done:
+		logger.Debug("[DEBUG] All shares finished, closing error channel")
+	case <-time.After(30 * time.Second):
+		logger.Debug("[DEBUG] Timeout waiting for shares to finish, forcing exit")
+	}
+
+	// Fechar errChan após timeout ou conclusão
+	errChanMutex.Lock()
+	if !errChanClosed {
+		close(errChan)
+		errChanClosed = true
+	}
+	errChanMutex.Unlock()
+
+	// NÃO fechar resultsChan aqui - ele é fechado pelo chamador
+
+	// Se há muitos timeouts, retornar erro simples em vez de usar aggregateErrors
+	if timeoutCount >= 3 {
+		return fmt.Errorf("multiple shares timing out on host")
+	}
+
+	// Usar aggregateErrors com timeout
+	return aggregateErrorsWithTimeout(errChan, 10*time.Second)
 }
