@@ -34,6 +34,7 @@ const (
 	stateResult
 	stateInputExtra state = iota + 100 // valor alto para não conflitar
 	stateSuggest
+	statePagination
 )
 
 type model struct {
@@ -48,6 +49,11 @@ type model struct {
 	inputLabel     string   // label do input extra
 	suggestions    []string // sugestões para navegação
 	suggestIndex   int      // índice selecionado na lista de sugestões
+	// Pagination fields
+	currentPage    int    // página atual
+	totalPages     int    // total de páginas
+	currentCommand string // comando atual sendo paginado
+	pageSize       int    // tamanho da página
 }
 
 type listItem string
@@ -104,11 +110,14 @@ func initialModel(domains []string, db *sql.DB) model {
 	ti.Placeholder = "Enter a command (ex: list files, exit)"
 	ti.Focus()
 	return model{
-		state:      stateDomainSelect,
-		domains:    domains,
-		domainList: l,
-		input:      ti,
-		db:         db,
+		state:       stateDomainSelect,
+		domains:     domains,
+		domainList:  l,
+		input:       ti,
+		db:          db,
+		currentPage: 1,
+		totalPages:  1,
+		pageSize:    50,
 	}
 }
 
@@ -158,7 +167,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil // não vai para stateResult
 				}
 				m.result = res
-				m.state = stateResult
+				// processCommand já define o estado corretamente (statePagination ou stateResult)
+				// então não precisamos sobrescrever aqui
+				if m.state != statePagination {
+					m.state = stateResult
+				}
 				m.input.SetValue("")
 			case "tab":
 				current := strings.TrimSpace(m.input.Value())
@@ -260,6 +273,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case statePagination:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "left", "h":
+				if m.currentPage > 1 {
+					m.currentPage--
+					m.result = m.executeListCommand(m.currentCommand, m.currentPage)
+				}
+			case "right", "l":
+				if m.currentPage < m.totalPages {
+					m.currentPage++
+					m.result = m.executeListCommand(m.currentCommand, m.currentPage)
+				}
+			case "enter", "esc", "q":
+				m.state = statePrompt
+				m.currentPage = 1
+				m.totalPages = 1
+				m.currentCommand = ""
+			case "ctrl+c":
+				return m, tea.Quit
+			}
+		}
+		return m, nil
 	case stateInputExtra:
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -332,10 +369,10 @@ func (m model) View() string {
 	case stateResult:
 		return fmt.Sprintf("Result:\n%s\n\n(enter to go back to prompt)", m.result)
 	case stateInputExtra:
-		return fmt.Sprintf("%s\n%s\n\n(for send, esc to cancel)", m.inputLabel, m.input.View())
+		return fmt.Sprintf("%s\n%s\n\n(enter to send, esc to cancel)", m.inputLabel, m.input.View())
 	case stateSuggest:
 		var sb strings.Builder
-		sb.WriteString("Sugestões:\n")
+		sb.WriteString("Suggestions:\n")
 		for i, s := range m.suggestions {
 			if i == m.suggestIndex {
 				sb.WriteString("> " + s + "\n")
@@ -345,41 +382,140 @@ func (m model) View() string {
 		}
 		sb.WriteString("\n(TAB/↓/j for down, ↑/k for up, ENTER to select, ESC to cancel)")
 		return sb.String()
+	case statePagination:
+		paginationInfo := fmt.Sprintf("\nPage %d of %d", m.currentPage, m.totalPages)
+		navInfo := ""
+		if m.totalPages > 1 {
+			navInfo = "\n(←/h: previous page, →/l: next page, ENTER/ESC/q: back to prompt)"
+		} else {
+			navInfo = "\n(ENTER/ESC/q: back to prompt)"
+		}
+		return fmt.Sprintf("Result:\n%s%s%s", m.result, paginationInfo, navInfo)
 	}
 	return ""
 }
 
-// Comando simples: list files
-func (m *model) processCommand(cmd string) string {
+// executeListCommand executes a list command with pagination
+func (m *model) executeListCommand(cmd string, page int) string {
 	cmd = strings.ToLower(cmd)
 	switch {
 	case cmd == "list files":
-		return m.listFiles()
+		return m.listFilesWithPagination(page)
 	case cmd == "list credentials":
-		return m.listCredentials()
+		return m.listCredentialsWithPagination(page)
 	case cmd == "list hosts":
-		return m.listHosts()
+		return m.listHostsWithPagination(page)
 	case cmd == "list shares":
-		return m.listShares()
+		return m.listSharesWithPagination(page)
 	case cmd == "list users":
-		return m.listUsers()
+		return m.listUsersWithPagination(page)
 	case cmd == "list low-hanging-fruits":
-		return m.listLowHangingFruits()
+		return m.listLowHangingFruitsWithPagination(page)
 	case cmd == "list large-files":
-		return m.listLargeFiles()
-	case strings.HasPrefix(cmd, "find file "):
-		pattern := strings.TrimSpace(strings.TrimPrefix(cmd, "find file "))
+		return m.listLargeFilesWithPagination(page)
+	default:
+		return fmt.Sprintf("Command not recognized: %s", cmd)
+	}
+}
+
+// Comando simples: list files
+func (m *model) processCommand(cmd string) string {
+	cmdLower := strings.ToLower(cmd)
+	switch {
+	case cmdLower == "list files":
+		result, totalPages := m.listFilesWithPaginationAndCount(1)
+		m.currentCommand = cmdLower
+		m.currentPage = 1
+		m.totalPages = totalPages
+		if totalPages > 1 {
+			m.state = statePagination
+		} else {
+			m.state = stateResult
+		}
+		return result
+	case cmdLower == "list credentials":
+		result, totalPages := m.listCredentialsWithPaginationAndCount(1)
+		m.currentCommand = cmdLower
+		m.currentPage = 1
+		m.totalPages = totalPages
+		if totalPages > 1 {
+			m.state = statePagination
+		} else {
+			m.state = stateResult
+		}
+		return result
+	case cmdLower == "list hosts":
+		result, totalPages := m.listHostsWithPaginationAndCount(1)
+		m.currentCommand = cmdLower
+		m.currentPage = 1
+		m.totalPages = totalPages
+		if totalPages > 1 {
+			m.state = statePagination
+		} else {
+			m.state = stateResult
+		}
+		return result
+	case cmdLower == "list shares":
+		result, totalPages := m.listSharesWithPaginationAndCount(1)
+		m.currentCommand = cmdLower
+		m.currentPage = 1
+		m.totalPages = totalPages
+		if totalPages > 1 {
+			m.state = statePagination
+		} else {
+			m.state = stateResult
+		}
+		return result
+	case cmdLower == "list users":
+		result, totalPages := m.listUsersWithPaginationAndCount(1)
+		m.currentCommand = cmdLower
+		m.currentPage = 1
+		m.totalPages = totalPages
+		if totalPages > 1 {
+			m.state = statePagination
+		} else {
+			m.state = stateResult
+		}
+		return result
+	case cmdLower == "list low-hanging-fruits":
+		result, totalPages := m.listLowHangingFruitsWithPaginationAndCount(1)
+		m.currentCommand = cmdLower
+		m.currentPage = 1
+		m.totalPages = totalPages
+		if totalPages > 1 {
+			m.state = statePagination
+		} else {
+			m.state = stateResult
+		}
+		return result
+	case cmdLower == "list large-files":
+		result, totalPages := m.listLargeFilesWithPaginationAndCount(1)
+		m.currentCommand = cmdLower
+		m.currentPage = 1
+		m.totalPages = totalPages
+		if totalPages > 1 {
+			m.state = statePagination
+		} else {
+			m.state = stateResult
+		}
+		return result
+	case strings.HasPrefix(cmdLower, "find file "):
+		pattern := strings.TrimSpace(strings.TrimPrefix(cmdLower, "find file "))
+		m.state = stateResult
 		return m.findFile(pattern)
-	case strings.HasPrefix(cmd, "export "):
-		return m.exportCommand(cmd)
-	case cmd == "switch domain":
+	case strings.HasPrefix(cmdLower, "export "):
+		m.state = stateResult
+		return m.exportCommand(cmdLower)
+	case cmdLower == "switch domain":
 		m.selectedDomain = ""
 		m.input.SetValue("")
 		m.state = stateDomainSelect
 		return ""
-	case cmd == "help":
+	case cmdLower == "help":
+		m.state = stateResult
 		return m.helpText()
 	default:
+		m.state = stateResult
 		return fmt.Sprintf("Command not recognized: %s", cmd)
 	}
 }
@@ -427,9 +563,24 @@ func formatTableBox(title string, headers []string, rows [][]string) string {
 	return sb.String()
 }
 
+func (m *model) countFiles() int {
+	var count int
+	query := `SELECT COUNT(*) FROM files WHERE LOWER(domain) = ?`
+	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain)).Scan(&count)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
 func (m *model) listFiles() string {
-	query := "SELECT id, path, share, domain, user, size, mod_time, file_type, match_pattern, match_type, local_path, found_time, leet_speak, search_param_type, search_param_value FROM files WHERE LOWER(domain) = ? ORDER BY id DESC LIMIT 50"
-	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain))
+	return m.listFilesWithPagination(1)
+}
+
+func (m *model) listFilesWithPagination(page int) string {
+	offset := (page - 1) * m.pageSize
+	query := "SELECT id, path, share, domain, user, size, mod_time, file_type, match_pattern, match_type, local_path, found_time, leet_speak, search_param_type, search_param_value FROM files WHERE LOWER(domain) = ? ORDER BY id DESC LIMIT ? OFFSET ?"
+	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), m.pageSize, offset)
 	if err != nil {
 		return fmt.Sprintf("Error querying files: %v", err)
 	}
@@ -451,9 +602,34 @@ func (m *model) listFiles() string {
 	return formatTableBox("Files", headers, data)
 }
 
+func (m *model) listFilesWithPaginationAndCount(page int) (string, int) {
+	result := m.listFilesWithPagination(page)
+	total := m.countFiles()
+	totalPages := (total + m.pageSize - 1) / m.pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	return result, totalPages
+}
+
+func (m *model) countCredentials() int {
+	var count int
+	query := `SELECT COUNT(*) FROM domain_credentials WHERE LOWER(domain) = ? AND NOT (password_clear = '' AND password_hash = '' AND password_ticket = '')`
+	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain)).Scan(&count)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
 func (m *model) listCredentials() string {
-	query := `SELECT domain, user, host, auth_method, password_clear, password_hash, password_ticket, found_time, isAdmin FROM domain_credentials WHERE LOWER(domain) = ? AND NOT (password_clear = '' AND password_hash = '' AND password_ticket = '') ORDER BY user, host`
-	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain))
+	return m.listCredentialsWithPagination(1)
+}
+
+func (m *model) listCredentialsWithPagination(page int) string {
+	offset := (page - 1) * m.pageSize
+	query := `SELECT domain, user, host, auth_method, password_clear, password_hash, password_ticket, found_time, isAdmin FROM domain_credentials WHERE LOWER(domain) = ? AND NOT (password_clear = '' AND password_hash = '' AND password_ticket = '') ORDER BY user, host LIMIT ? OFFSET ?`
+	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), m.pageSize, offset)
 	if err != nil {
 		return fmt.Sprintf("Error querying credentials: %v", err)
 	}
@@ -471,9 +647,34 @@ func (m *model) listCredentials() string {
 	return formatTableBox("Credentials", headers, data)
 }
 
+func (m *model) listCredentialsWithPaginationAndCount(page int) (string, int) {
+	result := m.listCredentialsWithPagination(page)
+	total := m.countCredentials()
+	totalPages := (total + m.pageSize - 1) / m.pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	return result, totalPages
+}
+
+func (m *model) countHosts() int {
+	var count int
+	query := `SELECT COUNT(DISTINCT host) FROM files WHERE LOWER(domain) = ?`
+	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain)).Scan(&count)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
 func (m *model) listHosts() string {
-	query := `SELECT DISTINCT host FROM files WHERE LOWER(domain) = ? ORDER BY host`
-	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain))
+	return m.listHostsWithPagination(1)
+}
+
+func (m *model) listHostsWithPagination(page int) string {
+	offset := (page - 1) * m.pageSize
+	query := `SELECT DISTINCT host FROM files WHERE LOWER(domain) = ? ORDER BY host LIMIT ? OFFSET ?`
+	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), m.pageSize, offset)
 	if err != nil {
 		return fmt.Sprintf("Error querying hosts: %v", err)
 	}
@@ -491,9 +692,34 @@ func (m *model) listHosts() string {
 	return formatTableBox("Hosts", headers, data)
 }
 
+func (m *model) listHostsWithPaginationAndCount(page int) (string, int) {
+	result := m.listHostsWithPagination(page)
+	total := m.countHosts()
+	totalPages := (total + m.pageSize - 1) / m.pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	return result, totalPages
+}
+
+func (m *model) countShares() int {
+	var count int
+	query := `SELECT COUNT(DISTINCT share) FROM files WHERE LOWER(domain) = ?`
+	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain)).Scan(&count)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
 func (m *model) listShares() string {
-	query := `SELECT DISTINCT share FROM files WHERE LOWER(domain) = ? ORDER BY share`
-	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain))
+	return m.listSharesWithPagination(1)
+}
+
+func (m *model) listSharesWithPagination(page int) string {
+	offset := (page - 1) * m.pageSize
+	query := `SELECT DISTINCT share FROM files WHERE LOWER(domain) = ? ORDER BY share LIMIT ? OFFSET ?`
+	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), m.pageSize, offset)
 	if err != nil {
 		return fmt.Sprintf("Error querying shares: %v", err)
 	}
@@ -511,9 +737,34 @@ func (m *model) listShares() string {
 	return formatTableBox("Shares", headers, data)
 }
 
+func (m *model) listSharesWithPaginationAndCount(page int) (string, int) {
+	result := m.listSharesWithPagination(page)
+	total := m.countShares()
+	totalPages := (total + m.pageSize - 1) / m.pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	return result, totalPages
+}
+
+func (m *model) countUsers() int {
+	var count int
+	query := `SELECT COUNT(DISTINCT user) FROM files WHERE LOWER(domain) = ?`
+	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain)).Scan(&count)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
 func (m *model) listUsers() string {
-	query := `SELECT DISTINCT user FROM files WHERE LOWER(domain) = ? ORDER BY user`
-	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain))
+	return m.listUsersWithPagination(1)
+}
+
+func (m *model) listUsersWithPagination(page int) string {
+	offset := (page - 1) * m.pageSize
+	query := `SELECT DISTINCT user FROM files WHERE LOWER(domain) = ? ORDER BY user LIMIT ? OFFSET ?`
+	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), m.pageSize, offset)
 	if err != nil {
 		return fmt.Sprintf("Error querying users: %v", err)
 	}
@@ -531,9 +782,35 @@ func (m *model) listUsers() string {
 	return formatTableBox("Users", headers, data)
 }
 
+func (m *model) listUsersWithPaginationAndCount(page int) (string, int) {
+	result := m.listUsersWithPagination(page)
+	total := m.countUsers()
+	totalPages := (total + m.pageSize - 1) / m.pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	return result, totalPages
+}
+
+// Helper function to count total records
+func (m *model) countLowHangingFruits() int {
+	var count int
+	query := `SELECT COUNT(*) FROM low_hanging_fruit WHERE LOWER(domain) = ?`
+	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain)).Scan(&count)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
 func (m *model) listLowHangingFruits() string {
-	query := `SELECT id, path, host, share, user, size, mod_time, match_pattern, match_type, scan_mode FROM low_hanging_fruit WHERE LOWER(domain) = ? ORDER BY id DESC LIMIT 50`
-	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain))
+	return m.listLowHangingFruitsWithPagination(1)
+}
+
+func (m *model) listLowHangingFruitsWithPagination(page int) string {
+	offset := (page - 1) * m.pageSize
+	query := `SELECT id, path, host, share, user, size, mod_time, match_pattern, match_type, scan_mode FROM low_hanging_fruit WHERE LOWER(domain) = ? ORDER BY id DESC LIMIT ? OFFSET ?`
+	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), m.pageSize, offset)
 	if err != nil {
 		return fmt.Sprintf("Error querying low-hanging fruits: %v", err)
 	}
@@ -553,9 +830,34 @@ func (m *model) listLowHangingFruits() string {
 	return formatTableBox("Low Hanging Fruits", headers, data)
 }
 
+func (m *model) listLowHangingFruitsWithPaginationAndCount(page int) (string, int) {
+	result := m.listLowHangingFruitsWithPagination(page)
+	total := m.countLowHangingFruits()
+	totalPages := (total + m.pageSize - 1) / m.pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	return result, totalPages
+}
+
+func (m *model) countLargeFiles() int {
+	var count int
+	query := `SELECT COUNT(*) FROM low_hanging_fruit WHERE large_file = 1 AND LOWER(domain) = ?`
+	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain)).Scan(&count)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
 func (m *model) listLargeFiles() string {
-	query := `SELECT l.id, l.path, l.host, l.share, l.user, l.size, l.mod_time, l.match_pattern, l.match_type, l.scan_mode, l.large_file FROM low_hanging_fruit l WHERE l.large_file = 1 AND LOWER(l.domain) = ? ORDER BY l.id DESC LIMIT 50`
-	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain))
+	return m.listLargeFilesWithPagination(1)
+}
+
+func (m *model) listLargeFilesWithPagination(page int) string {
+	offset := (page - 1) * m.pageSize
+	query := `SELECT l.id, l.path, l.host, l.share, l.user, l.size, l.mod_time, l.match_pattern, l.match_type, l.scan_mode, l.large_file FROM low_hanging_fruit l WHERE l.large_file = 1 AND LOWER(l.domain) = ? ORDER BY l.id DESC LIMIT ? OFFSET ?`
+	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), m.pageSize, offset)
 	if err != nil {
 		return fmt.Sprintf("Error querying large files: %v", err)
 	}
@@ -574,6 +876,16 @@ func (m *model) listLargeFiles() string {
 	}
 	headers := []string{"ID", "Path", "Host", "Share", "User", "Size", "ModTime", "Pattern", "Type", "Mode", "LargeFile"}
 	return formatTableBox("Large Files", headers, data)
+}
+
+func (m *model) listLargeFilesWithPaginationAndCount(page int) (string, int) {
+	result := m.listLargeFilesWithPagination(page)
+	total := m.countLargeFiles()
+	totalPages := (total + m.pageSize - 1) / m.pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	return result, totalPages
 }
 
 func (m *model) findFile(pattern string) string {

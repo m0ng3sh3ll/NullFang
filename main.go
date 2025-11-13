@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	VERSION = "1.1.0"
+	VERSION = "v1.5.0"
 	AUTHOR  = "M0ng3Sh3ll"
 )
 
@@ -65,7 +65,7 @@ var (
 	noCopyFlag           = flag.Bool("no-copy", false, "Only list files without copying them")
 	noCopyDeepFlag       = flag.Bool("no-copy-deep", false, "No-copy mode, but allows content and regex search (less stealth)")
 	threadsFlag          = flag.Int("threads", 10, "Number of concurrent threads")
-	timeoutFlag          = flag.Duration("timeout", 5*time.Minute, "Search timeout duration")
+	timeoutFlag          = flag.Duration("timeout", 2*time.Minute, "Search timeout duration")
 	copyTimeoutFlag      = flag.Duration("copy-timeout", 2*time.Minute, "File copy timeout")
 	helpFlag             = flag.Bool("help", false, "Show help")
 	versionFlag          = flag.Bool("version", false, "Show version information")
@@ -343,18 +343,7 @@ func main() {
 			"NullFang -n 192.168.1.0/24 -u admin -p password --batch-mode --mini-batch-size 10",
 		)
 	}
-	if *resumeFlag != "" && *ntlmHashFlag == "" {
-		printUsageError(
-			"To continue execution, you need to provide credentials:",
-			"NullFang -resume checkpoints/nullfang_resume_*.json -p <password>",
-		)
-	}
-	if *resumeFlag != "" && *usernameFlag == "" {
-		printUsageError(
-			"To resume, you must specify the username with -u <username>.",
-			"NullFang -resume checkpoints/nullfang_resume_*.json -u admin -p <password>",
-		)
-	}
+	// Validação do username será feita após carregar o checkpoint
 	if *resumeFlag != "" && *domainFlag == "WORKGROUP" {
 		printUsageError(
 			"To resume, you must specify the domain with -d <domain>.",
@@ -618,6 +607,14 @@ func main() {
 		if isBlank(*usernameFlag) {
 			*usernameFlag = checkpointInstance.GetUser()
 			logger.Debug("Using username from checkpoint: %s", *usernameFlag)
+		}
+
+		// Validar se username foi obtido do checkpoint ou fornecido
+		if isBlank(*usernameFlag) {
+			printUsageError(
+				"Username not found in checkpoint and not provided. Please specify username with -u <username>.",
+				"NullFang -resume checkpoints/nullfang_resume_*.json -u admin -p <password>",
+			)
 		}
 
 		if isBlank(*domainFlag) {
@@ -2067,12 +2064,14 @@ func configureSearch() *search.SearchConfig {
 
 	// Cria e configura SearchConfig
 	config := search.NewSearchConfig()
+	config.Verbose = *verboseFlag
 	config.MaxFileSize = *maxSizeFlag
 	config.CaseSensitive = *caseSensitive
 	config.SearchBinary = *binaryFlag
 	config.MinBinaryStringLen = *minBinaryStringFlag
 	config.MaxCacheFileSize = *maxCacheFileSizeFlag
 	config.MaxDepth = *maxDepthFlag
+	config.Timeout = *timeoutFlag
 
 	// Em modo no-copy, só habilita busca por conteúdo/regex se --no-copy-deep estiver ativo
 	if *noCopyFlag {
@@ -2462,16 +2461,48 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 		return nil
 	}
 
-	// Search files
+	// Search files with host timeout
 	resultsChan := make(chan *search.SearchResult, 1000)
 	fileContentCache, _ = scanner.NewFileContentCache(1000)
+	var searchErr error
+
+	// Context com timeout para o host inteiro
+	hostCtx, hostCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer hostCancel()
+
+	// Canal para sinalizar quando a busca terminar
+	searchDone := make(chan error, 1)
+
 	go func() {
-		err := search.SearchMultipleSharesStream(shares, searchConfig, fileContentCache, resultsChan)
+		defer close(resultsChan)
+		searchErr = search.SearchMultipleSharesStream(shares, searchConfig, fileContentCache, resultsChan)
+		select {
+		case searchDone <- searchErr:
+		case <-hostCtx.Done():
+			// Host foi cancelado, não enviar erro
+		}
+	}()
+
+	// Aguardar busca ou timeout do host
+	select {
+	case err := <-searchDone:
 		if err != nil && *verboseFlag {
 			logger.Debug("Search error on %s: %v", host, err)
 		}
+		// Se há muitos erros de timeout, considerar como host problemático
+		if err != nil && strings.Contains(err.Error(), "directory . consistently timing out") {
+			fmt.Printf("⚠️ Host %s has multiple timeout issues. Skipping to next host.\n", host)
+			searchErr = fmt.Errorf("host %s has multiple timeout issues", host)
+		} else {
+			searchErr = err
+		}
+	case <-hostCtx.Done():
+		// Host timeout - encerrar busca
+		fmt.Printf("⏰ Host %s timeout after 5 minutes. Skipping to next host.\n", host)
+		searchErr = fmt.Errorf("host %s timeout after 5 minutes", host)
+		// Forçar fechamento do canal
 		close(resultsChan)
-	}()
+	}
 
 	// Processa cada resultado assim que chega
 	for result := range resultsChan {
