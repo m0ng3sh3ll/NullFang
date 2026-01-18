@@ -34,9 +34,10 @@ type SMBConfig struct {
 
 // SMBConnection represents an SMB connection
 type SMBConnection struct {
-	Config      *SMBConfig
-	Connection  *smb2.Session
-	IsConnected bool
+	Config        *SMBConfig
+	Connection    *smb2.Session
+	IsConnected   bool
+	stopKeepAlive chan struct{}
 }
 
 // NewSMBConnection creates a new SMB connection
@@ -79,7 +80,8 @@ func (c *SMBConnection) Connect() error {
 	}
 
 	dialer := net.Dialer{
-		Timeout: timeout,
+		Timeout:   timeout,
+		KeepAlive: 30 * time.Second,
 	}
 
 	conn, err := dialer.Dial("tcp", addr)
@@ -216,14 +218,26 @@ func (c *SMBConnection) Connect() error {
 		return fmt.Errorf("SMB authentication failed: %v", err)
 	}
 
+	c.stopKeepAlive = make(chan struct{})
 	c.Connection = session
 	c.IsConnected = true
+
+	// Iniciar keep-alive para manter conexão ativa
+	go c.keepAlive()
+
 	return nil
 }
 
 // Disconnect closes the SMB connection
 func (c *SMBConnection) Disconnect() {
 	if c.IsConnected && c.Connection != nil {
+		// Parar keep-alive antes de desconectar
+		if c.stopKeepAlive != nil {
+			close(c.stopKeepAlive)
+			c.stopKeepAlive = nil // Evitar double-close
+		}
+
+		// Logoff fecha a sessão SMB (o que automaticamente desmonta todos os shares)
 		c.Connection.Logoff()
 		c.IsConnected = false
 	}
@@ -308,4 +322,31 @@ func (c *SMBConnection) CopyFile(share *smb2.Share, remotePath, localPath string
 	}
 
 	return written, nil
+}
+
+// keepAlive mantém a conexão SMB ativa fazendo operações periódicas
+func (c *SMBConnection) keepAlive() {
+	ticker := time.NewTicker(20 * time.Second) // Ping a cada 20 segundos
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.stopKeepAlive:
+			logger.Debug("[KEEP-ALIVE] Goroutine exiting for connection to %s", c.Config.Host)
+			return
+		case <-ticker.C:
+			if !c.IsConnected || c.Connection == nil {
+				return
+			}
+
+			// Fazer operação leve para manter conexão ativa
+			_, err := c.Connection.ListSharenames()
+			if err != nil {
+				logger.Debug("[KEEP-ALIVE] Failed to ping server %s: %v", c.Config.Host, err)
+				// Não fechar conexão, apenas logar
+			} else {
+				logger.Debug("[KEEP-ALIVE] Connection to %s refreshed successfully", c.Config.Host)
+			}
+		}
+	}
 }

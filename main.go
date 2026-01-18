@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	VERSION = "v1.5.0"
+	VERSION = "v1.5.4"
 	AUTHOR  = "M0ng3Sh3ll"
 )
 
@@ -64,7 +64,7 @@ var (
 	verboseFlag          = flag.Bool("v", false, "Verbose output")
 	noCopyFlag           = flag.Bool("no-copy", false, "Only list files without copying them")
 	noCopyDeepFlag       = flag.Bool("no-copy-deep", false, "No-copy mode, but allows content and regex search (less stealth)")
-	threadsFlag          = flag.Int("threads", 10, "Number of concurrent threads")
+	threadsFlag          = flag.Int("threads", 1, "Number of concurrent threads")
 	timeoutFlag          = flag.Duration("timeout", 2*time.Minute, "Search timeout duration")
 	copyTimeoutFlag      = flag.Duration("copy-timeout", 2*time.Minute, "File copy timeout")
 	helpFlag             = flag.Bool("help", false, "Show help")
@@ -76,7 +76,7 @@ var (
 	resumeFlag           = flag.String("resume", "", "Checkpoint file to resume previous execution")
 	chunkSizeFlag        = flag.String("chunk-size", "1m", "Chunk size for file reading (e.g., 256k, 1m)")
 	bufferSizeFlag       = flag.String("buffer-size", "32k", "Buffer size for read operations (e.g., 8k, 32k)")
-	maxConnsPerHostFlag  = flag.Int("max-conns-per-host", 3, "Maximum number of concurrent connections per host")
+	maxConnsPerHostFlag  = flag.Int("max-conns-per-host", 1, "Maximum number of concurrent connections per host")
 	maxConcurrentFlag    = flag.Int("max-concurrent", 5, "Maximum number of global concurrent operations")
 	batchSizeFlag        = flag.Int("batch-size", 100, "Batch size for operations")
 	batchTimeoutFlag     = flag.Duration("batch-timeout", 2*time.Second, "Timeout for batch processing")
@@ -101,6 +101,7 @@ var (
 	smbDialectFlag       = flag.String("smb-dialect", "", "Force SMB dialect (SMB311, SMB302, SMB300, SMB210, SMB202)")
 	smbSigningFlag       = flag.String("smb-signing", "", "Force SMB signing (on/off)")
 	localAuthFlag        = flag.Bool("local-auth", false, "Use local account authentication (uses the target's hostname as domain)")
+	checkAdminFlag       = flag.Bool("check-admin", false, "Check if user has admin privileges (may trigger EDR alerts)")
 	webFlag              = flag.Bool("web", false, "Start web interface server")
 	webPortFlag          = flag.String("web-port", "9090", "Port for web interface server")
 	dbFlag               = flag.String("db", "", "Custom database path for web interface")
@@ -829,9 +830,14 @@ func main() {
 		logger.Fatal("Error initializing file LRU cache: %v", err)
 	}
 
-	// Ajuste para o modo -no-copy: não adicionar arquivos large_file se não baterem com string ou extensão
-	if *noCopyFlag {
-		searchConfig.FilterLargeFiles = true // nova flag para filtrar large_files
+	// Ajuste para não reportar arquivos grandes se estiver buscando algo específico (extensão, nome, conteúdo)
+	hasSearchCriteria := len(searchConfig.FileExtensions) > 0 ||
+		len(searchConfig.FilenamePatterns) > 0 ||
+		len(searchConfig.ContentPatterns) > 0 ||
+		len(searchConfig.RegexPatterns) > 0
+
+	if *noCopyFlag || hasSearchCriteria {
+		searchConfig.FilterLargeFiles = true // filtrar large_files se houver critérios de busca
 	}
 
 	resultsChan := make(chan hostResult, len(hosts))
@@ -1123,7 +1129,7 @@ func main() {
 						fmt.Printf(" - %s:\n", host)
 						fmt.Printf("    ➔ %d file(s) listed (large files: %d, new this run: ", count, largeFilesByHost[host])
 						var newLHFCount int
-						db.QueryRow("SELECT COUNT(*) FROM low_hanging_fruit WHERE host = ? AND LOWER(domain) = LOWER(?) AND LOWER(user) = LOWER(?) AND found_time >= ?", host, domain, user, execStartTime).Scan(&newLHFCount)
+						db.QueryRow("SELECT COUNT(*) FROM low_hanging_hanging_fruit WHERE host = ? AND LOWER(domain) = LOWER(?) AND LOWER(user) = LOWER(?) AND found_time >= ?", host, domain, user, execStartTime).Scan(&newLHFCount)
 						fmt.Printf("%d)\n", newLHFCount)
 						fmt.Printf("    ➔ Details at: %s\n", interestingFilesPaths[host])
 						if newLHFCount > 0 {
@@ -1634,7 +1640,69 @@ func UpsertDomainCredential(db *sql.DB, domain, user, host, authMethod, password
 	return err
 }
 
-func processShares(conn *smb.SMBConnection, host string) map[string]*smb2.Share {
+func processShares(conn *smb.SMBConnection, host string) map[string]*search.MountedShare {
+	// Se especificou shares, vamos processar o que o usuário pediu diretamente
+	if *specificShareFlag != "" {
+		mountedShares := make(map[string]*search.MountedShare)
+		requestedShares := strings.Split(*specificShareFlag, ",")
+
+		availableShares, err := conn.ListShares()
+		if err != nil {
+			logger.Warning("[-] Failed to list shares on %s (but continuing with requested shares): %v", host, err)
+			// Continuamos mesmo se falhar em listar, pois o usuário especificou o que quer
+		}
+
+		for _, req := range requestedShares {
+			req = strings.TrimSpace(req)
+			if req == "" {
+				continue
+			}
+
+			// Parse share name and path
+			// Formats: "Share", "Share\Path", "Share/Path"
+			req = strings.ReplaceAll(req, "/", "\\")
+			parts := strings.SplitN(req, "\\", 2)
+
+			shareName := parts[0]
+			startPath := "."
+			if len(parts) > 1 && parts[1] != "" {
+				startPath = parts[1]
+			}
+
+			// Validate if share exists (optional check against availableShares)
+			found := false
+			if availableShares != nil {
+				for _, s := range availableShares {
+					if strings.EqualFold(s, shareName) {
+						shareName = s // Use correct case from server
+						found = true
+						break
+					}
+				}
+				if !found && availableShares != nil {
+					// Se pudemos listar e não achamos, avisamos mas tentamos montar igual (pode ser hidden)
+					logger.Debug("Requested share %s not found in enumeration list", shareName)
+				}
+			}
+
+			fs, err := conn.MountShare(shareName)
+			if err != nil {
+				logger.Error("[-] Failed to mount share %s on %s: %v", shareName, host, err)
+				continue
+			}
+
+			shareNameWithIP := fmt.Sprintf("\\\\%s\\%s", host, shareName)
+			mountedShares[shareNameWithIP] = &search.MountedShare{
+				Share:     fs,
+				StartPath: startPath,
+				ShareName: shareName,
+			}
+			logger.Debug("Mounted share %s with start path: %s", shareName, startPath)
+		}
+		return mountedShares
+	}
+
+	// Se não especificou share, lista todos e monta na raiz
 	shares, err := conn.ListShares()
 	if err != nil {
 		logger.Error("[-] Failed to list shares on %s: %v", host, err)
@@ -1645,13 +1713,7 @@ func processShares(conn *smb.SMBConnection, host string) map[string]*smb2.Share 
 		logger.Info("Found %d shares on %s", len(shares), host)
 	}
 
-	// Filter shares if specified
-	if *specificShareFlag != "" {
-		shares = filterShares(shares, strings.Split(*specificShareFlag, ","))
-	}
-
-	// Mount shares
-	mountedShares := make(map[string]*smb2.Share)
+	mountedShares := make(map[string]*search.MountedShare)
 	for _, shareName := range shares {
 		if isSpecialShare(shareName) {
 			continue
@@ -1659,7 +1721,11 @@ func processShares(conn *smb.SMBConnection, host string) map[string]*smb2.Share 
 
 		if fs, err := conn.MountShare(shareName); err == nil {
 			shareNameWithIP := fmt.Sprintf("\\\\%s\\%s", host, shareName)
-			mountedShares[shareNameWithIP] = fs
+			mountedShares[shareNameWithIP] = &search.MountedShare{
+				Share:     fs,
+				StartPath: ".",
+				ShareName: shareName,
+			}
 		}
 	}
 
@@ -1679,12 +1745,27 @@ func filterShares(shares, specificShares []string) []string {
 	return filtered
 }
 
-func searchAndCopyFiles(host string, conn *smb.SMBConnection, shares map[string]*smb2.Share, searchConfig *search.SearchConfig, copyConfig *copyutil.CopyConfig, fileContentCache *scanner.FileContentCache) {
+func searchAndCopyFiles(host string, conn *smb.SMBConnection, shares map[string]*search.MountedShare, searchConfig *search.SearchConfig, copyConfig *copyutil.CopyConfig, fileContentCache *scanner.FileContentCache) {
 	// Create context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), *copyTimeoutFlag)
 	defer cancel()
 
-	results, err := search.SearchMultipleShares(shares, searchConfig, fileContentCache)
+	// Adapt to Legacy SearchMultipleShares if strictly needed, or update SearchMultipleShares
+	// For now, let's assume SearchMultipleSharesStream in main loop is the main usage.
+	// If searchAndCopyFiles is legacy, we might need a bridge.
+	// Actually, let's just make sure it compiles. SearchMultipleShares expects map[string]*smb2.Share.
+	// We need to convert back or update SearchMultipleShares to accept MountedShare.
+	// Since I updated SearchMultipleSharesStream, let's assume searchAndCopyFiles is legacy/unused or needs update.
+	// Let's update SearchMultipleShares signature in search.go on next step if compiler complains.
+	// CHECK: I updated SearchMultipleShares to take smb2.Share.
+	// So I have to convert here.
+
+	simpleShares := make(map[string]*smb2.Share)
+	for k, v := range shares {
+		simpleShares[k] = v.Share
+	}
+
+	results, err := search.SearchMultipleShares(simpleShares, searchConfig, fileContentCache)
 	if err != nil {
 		logger.Error("[-] Search error: %v", err)
 		return
@@ -1701,7 +1782,10 @@ func searchAndCopyFiles(host string, conn *smb.SMBConnection, shares map[string]
 			for _, result := range results {
 				miniBatch = append(miniBatch, result)
 				if len(miniBatch) >= copyConfig.MiniBatchSize {
-					copyResults, _, err := copyutil.CopyMatchedFiles(ctx, db, shares, miniBatch, copyConfig, host, &smb.Throttler{})
+					if *verboseFlag {
+						logger.Info("Copying batch of %d files...", len(miniBatch))
+					}
+					copyResults, _, err := copyutil.CopyMatchedFiles(ctx, db, simpleShares, miniBatch, copyConfig, host, &smb.Throttler{})
 					if err != nil {
 						logger.Error("[ERROR] Failed to copy files: %v", err)
 						return
@@ -1719,7 +1803,7 @@ func searchAndCopyFiles(host string, conn *smb.SMBConnection, shares map[string]
 			}
 			// Processa o que sobrou
 			if len(miniBatch) > 0 {
-				copyResults, _, err := copyutil.CopyMatchedFiles(ctx, db, shares, miniBatch, copyConfig, host, &smb.Throttler{})
+				copyResults, _, err := copyutil.CopyMatchedFiles(ctx, db, simpleShares, miniBatch, copyConfig, host, &smb.Throttler{})
 				if err != nil {
 					logger.Error("[ERROR] Failed to copy files: %v", err)
 					return
@@ -1742,7 +1826,7 @@ func searchAndCopyFiles(host string, conn *smb.SMBConnection, shares map[string]
 				throttler = throttlersByHost[host]
 			}
 			for _, result := range results {
-				res, err := copyutil.CopySingleMatch(ctx, db, shares, result, copyConfig, host, throttler)
+				res, err := copyutil.CopySingleMatch(ctx, db, simpleShares, result, copyConfig, host, throttler)
 				if res != nil && res.Success {
 					sucesso++
 				} else if err != nil {
@@ -1765,7 +1849,7 @@ func showBanner() {
 %s██╔██╗ ██║██║   ██║██║     ██║     █████╗  ███████║██╔██╗ ██║██║  ███╗%s
 %s██║╚██╗██║██║   ██║██║     ██║     ██╔══╝  ██╔══██║██║╚██╗██║██║   ██║%s
 %s██║ ╚████║╚██████╔╝███████╗███████╗██║     ██║  ██║██║ ╚████║╚██████╔╝%s
-%s╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚══════╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝ %s
+%s╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚══════╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚══════╝ %s
 %s		[SMB Breach Intelligence Crawler]            
 %s     
 %s[Author: %s - github.com/m0ng3sh3ll/NullFang]%s
@@ -1838,6 +1922,7 @@ func showHelp() {
 	fmt.Println("  -cs                         Enable case sensitive search")
 	fmt.Println("  -leet                       Enable leet speak variations in search")
 	fmt.Println("  -no-copy                    Only list files without copying them")
+	fmt.Println("  -no-copy-deep               No-copy-deep mode, allows content and regex search (less stealth)")
 	fmt.Println("  -binary                     Enable search in binary files (default: false)")
 	fmt.Println("  -min-binary-string int      Minimum string length for binary extraction (default: 4)")
 	fmt.Println("  -max-cache-file-size int    Maximum file size (in bytes) to cache content (default: 1MB)")
@@ -2072,6 +2157,7 @@ func configureSearch() *search.SearchConfig {
 	config.MaxCacheFileSize = *maxCacheFileSizeFlag
 	config.MaxDepth = *maxDepthFlag
 	config.Timeout = *timeoutFlag
+	config.MaxWorkers = *threadsFlag // Aplicar flag -threads ao MaxWorkers
 
 	// Em modo no-copy, só habilita busca por conteúdo/regex se --no-copy-deep estiver ativo
 	if *noCopyFlag {
@@ -2346,7 +2432,7 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 		Domain:   domain,
 		Username: *usernameFlag,
 		Password: *passwordFlag,
-		Timeout:  10 * time.Second,
+		Timeout:  30 * time.Minute, // Timeout longo para evitar desconexão durante scans
 	}
 
 	// Configure authentication
@@ -2393,7 +2479,12 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 			}
 			return connectionError
 		}
-		defer conn.Disconnect()
+		defer func() {
+			logger.Debug("[DEBUG] About to disconnect from %s", host)
+			// Sleep para garantir que workers e keep-alive terminem
+			time.Sleep(500 * time.Millisecond)
+			conn.Disconnect()
+		}()
 
 		// Após autenticar e antes de processar arquivos, se local-auth, tentar obter o hostname via SRVSVC ou NBNS
 		if *localAuthFlag && connectionError == nil {
@@ -2473,13 +2564,42 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 	// Canal para sinalizar quando a busca terminar
 	searchDone := make(chan error, 1)
 
+	// Garantir que resultsChan seja fechado apenas uma vez
+	var closeOnce sync.Once
+	closeResultsChan := func() {
+		closeOnce.Do(func() {
+			close(resultsChan)
+		})
+	}
+
 	go func() {
-		defer close(resultsChan)
+		defer closeResultsChan()
 		searchErr = search.SearchMultipleSharesStream(shares, searchConfig, fileContentCache, resultsChan)
 		select {
 		case searchDone <- searchErr:
 		case <-hostCtx.Done():
 			// Host foi cancelado, não enviar erro
+		}
+	}()
+
+	// Processar resultados em goroutine separada para não perder arquivos em caso de timeout
+	var copyWg sync.WaitGroup
+	copyWg.Add(1)
+	go func() {
+		defer copyWg.Done()
+		// Convert shares to map[string]*smb2.Share for copyutil
+		simpleShares := make(map[string]*smb2.Share)
+		for k, v := range shares {
+			simpleShares[k] = v.Share
+		}
+
+		// Consumir resultados e copiar
+		for result := range resultsChan {
+			// Copy single match
+			_, err := copyutil.CopySingleMatch(ctx, db, simpleShares, result, copyConfig, host, nil)
+			if err != nil {
+				logger.Error("[-] Failed to copy %s: %v", result.FilePath, err)
+			}
 		}
 	}()
 
@@ -2500,17 +2620,15 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 		// Host timeout - encerrar busca
 		fmt.Printf("⏰ Host %s timeout after 5 minutes. Skipping to next host.\n", host)
 		searchErr = fmt.Errorf("host %s timeout after 5 minutes", host)
-		// Forçar fechamento do canal
-		close(resultsChan)
+		// Fechar canal usando sync.Once
+		closeResultsChan()
 	}
 
-	// Processa cada resultado assim que chega
-	for result := range resultsChan {
-		_, err := copyutil.CopySingleMatch(ctx, db, shares, result, copyConfig, host, throttler)
-		if err != nil && *verboseFlag {
-			logger.Debug("[-] Copy error on %s: %v", host, err)
-		}
-	}
+	// Aguardar que todos os arquivos encontrados sejam copiados
+	copyWg.Wait()
+
+	// IMPORTANTE: Aguardar um pouco para garantir que goroutines de keep-alive dos shares terminem
+	time.Sleep(100 * time.Millisecond)
 
 	if checkpointInstance != nil {
 		checkpointInstance.MarkHostProcessed(host)
@@ -2521,8 +2639,9 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 	}
 
 	// Teste de privilégio admin (stealth): abrir pipe svcctl
+	// Só executa se flag -check-admin estiver ativa (pode gerar alertas no EDR)
 	isAdmin := false
-	if conn.Connection != nil {
+	if *checkAdminFlag && conn.Connection != nil {
 		fs, err := conn.Connection.Mount("IPC$")
 		if err == nil {
 			defer fs.Umount()
@@ -2544,6 +2663,8 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 		} else if *verboseFlag {
 			logger.Warning("[USER] Unable to mount IPC$ for admin privilege test: %v", err)
 		}
+	} else if *checkAdminFlag && *verboseFlag {
+		logger.Debug("[INFO] Admin check skipped (no connection available)")
 	}
 
 	saveCredential(db, smbConfig.Domain, *usernameFlag, determineAuthMethod(), host, *passwordFlag, *ntlmHashFlag, *ticketFileFlag, time.Now().Format("2006-01-02 15:04:05"), isAdmin)

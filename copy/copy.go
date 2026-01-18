@@ -127,6 +127,40 @@ type CopyQueueEntry struct {
 	SearchParamValue string `json:"search_param_value,omitempty"`
 }
 
+// matchesAnyExtension verifica se o arquivo corresponde a qualquer extensão fornecida
+// Suporta múltiplas extensões como .env.prod, .config.json, etc.
+func matchesAnyExtension(filename string, extensions []string) bool {
+	if len(extensions) == 0 {
+		return true
+	}
+
+	filenameLower := strings.ToLower(filename)
+
+	// Dividir o nome do arquivo por pontos para pegar todas as extensões
+	// Ex: "config.env.prod" -> ["config", "env", "prod"]
+	parts := strings.Split(filenameLower, ".")
+
+	for _, ext := range extensions {
+		extLower := strings.ToLower(ext)
+		// Remover ponto inicial se houver
+		extLower = strings.TrimPrefix(extLower, ".")
+
+		// Verificar se o arquivo termina com esta extensão
+		if strings.HasSuffix(filenameLower, "."+extLower) {
+			return true
+		}
+
+		// Verificar se alguma das partes do arquivo corresponde à extensão
+		for _, part := range parts {
+			if part == extLower {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 type CopyQueue struct {
 	Host    string           `json:"host"`
 	Entries []CopyQueueEntry `json:"entries"`
@@ -853,19 +887,12 @@ func CopyMatchedFiles(ctx context.Context, db *sql.DB, shares map[string]*smb2.S
 				}
 			}
 
-			// Verificar correspondência por extensão
-			if !matchesCriteria {
-				ext := strings.ToLower(filepath.Ext(result.FilePath))
-				for _, validExt := range config.FileExtensions {
-					if !strings.HasPrefix(validExt, ".") {
-						validExt = "." + validExt
-					}
-					if strings.EqualFold(ext, validExt) {
-						matchesCriteria = true
-						if config.Verbose {
-							logger.Debug("File matches extension: %s", validExt)
-						}
-						break
+			// Verificar correspondência por extensão (suporta .env.prod, etc.)
+			if !matchesCriteria && len(config.FileExtensions) > 0 {
+				if matchesAnyExtension(filepath.Base(result.FilePath), config.FileExtensions) {
+					matchesCriteria = true
+					if config.Verbose {
+						logger.Debug("[COPY-DEBUG] File %s matches extension filter", result.FilePath)
 					}
 				}
 			}
@@ -1646,6 +1673,11 @@ func CopySingleMatch(ctx context.Context, db *sql.DB, shares map[string]*smb2.Sh
 		if config.NoCopyDeep {
 			scanMode = "no-copy-deep"
 		}
+		// Usar o padrão de busca real em vez de MatchValue genérico
+		matchPattern := result.MatchValue
+		if matchPattern == "" || matchPattern == "Large File" {
+			matchPattern = getSearchParamValue(result.MatchType, config, result.RegexMatch)
+		}
 		_, err := database.InsertLowHangingFruit(
 			db,
 			result.FilePath,
@@ -1656,7 +1688,7 @@ func CopySingleMatch(ctx context.Context, db *sql.DB, shares map[string]*smb2.Sh
 			result.FileSize,
 			time.Now(),
 			"",
-			result.MatchValue,
+			matchPattern,
 			result.MatchType,
 			formatSize(result.FileSize),
 			scanMode,
@@ -1678,16 +1710,9 @@ func CopySingleMatch(ctx context.Context, db *sql.DB, shares map[string]*smb2.Sh
 				break
 			}
 		}
-		if !matchesCriteria {
-			ext := strings.ToLower(filepath.Ext(result.FilePath))
-			for _, validExt := range config.FileExtensions {
-				if !strings.HasPrefix(validExt, ".") {
-					validExt = "." + validExt
-				}
-				if strings.EqualFold(ext, validExt) {
-					matchesCriteria = true
-					break
-				}
+		if !matchesCriteria && len(config.FileExtensions) > 0 {
+			if matchesAnyExtension(filepath.Base(result.FilePath), config.FileExtensions) {
+				matchesCriteria = true
 			}
 		}
 		if !matchesCriteria && result.ContentMatch != "" {
@@ -1698,6 +1723,11 @@ func CopySingleMatch(ctx context.Context, db *sql.DB, shares map[string]*smb2.Sh
 		}
 		if matchesCriteria {
 			scanMode := "large-file"
+			// Usar o padrão de busca real em vez de MatchValue genérico
+			matchPattern := result.MatchValue
+			if matchPattern == "" || matchPattern == "Large File" {
+				matchPattern = getSearchParamValue(result.MatchType, config, result.RegexMatch)
+			}
 			_, err := database.InsertLowHangingFruit(
 				db,
 				result.FilePath,
@@ -1708,7 +1738,7 @@ func CopySingleMatch(ctx context.Context, db *sql.DB, shares map[string]*smb2.Sh
 				result.FileSize,
 				time.Now(),
 				"",
-				result.MatchValue,
+				matchPattern,
 				result.MatchType,
 				formatSize(result.FileSize),
 				scanMode,
@@ -1751,6 +1781,10 @@ func CopySingleMatch(ctx context.Context, db *sql.DB, shares map[string]*smb2.Sh
 	if fi, err := share.Stat(result.FilePath); err == nil {
 		remoteModTime = fi.ModTime().UTC().Truncate(time.Second)
 		remoteSize = fi.Size()
+	} else {
+		if config.Verbose {
+			logger.Debug("[COPY-DEBUG] Failed to stat remote file %s: %v", result.FilePath, err)
+		}
 	}
 
 	// 3. Obter info do arquivo base local (se existir)

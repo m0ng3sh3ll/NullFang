@@ -74,7 +74,7 @@ func InitDB(path string) (*sql.DB, error) {
 		large_file BOOLEAN,
 		size_formatted TEXT,
 		scan_mode TEXT,
-		UNIQUE(path, host, share, scan_mode)
+		UNIQUE(path, host, share, domain, user, scan_mode, match_pattern, match_type)
 	);
 	`)
 	if err != nil {
@@ -277,6 +277,12 @@ func InitDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("erro ao inserir regras padrão: %v", err)
 	}
 
+	// Run migration for existing databases
+	err = MigrateAddSearchParamsToUnique(db)
+	if err != nil {
+		return nil, fmt.Errorf("migration failed: %v", err)
+	}
+
 	return db, nil
 }
 
@@ -309,9 +315,9 @@ func InsertFile(
 
 func InsertLowHangingFruit(db *sql.DB, path, host, share, domain, user string, size int64, modTime time.Time, fileType, matchPattern, matchType, sizeFormatted, scanMode string, largeFile bool) (bool, error) {
 	var exists int
-	err := db.QueryRow("SELECT COUNT(1) FROM low_hanging_fruit WHERE path=? AND host=? AND share=? AND domain=? AND user=? AND scan_mode=?", path, host, share, domain, user, scanMode).Scan(&exists)
+	err := db.QueryRow("SELECT COUNT(1) FROM low_hanging_fruit WHERE path=? AND host=? AND share=? AND domain=? AND user=? AND scan_mode=? AND match_pattern=? AND match_type=?", path, host, share, domain, user, scanMode, matchPattern, matchType).Scan(&exists)
 	if err == nil && exists > 0 {
-		return false, nil // Already exists
+		return false, nil // Already exists with same search parameters
 	}
 	stmt, err := db.Prepare(`INSERT INTO low_hanging_fruit(path, host, share, domain, user, size, mod_time, file_type, match_pattern, match_type, found_time, large_file, size_formatted, scan_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {

@@ -51,9 +51,13 @@ func NewServer(dbPath string) (*Server, error) {
 
 	// Servir arquivos estáticos
 	router.Static("/static", "./web/frontend/src")
-	router.StaticFile("/", "./web/frontend/src/index.html")
 	router.StaticFile("/router.js", "./web/frontend/src/router.js")
 	router.StaticFile("/index.html", "./web/frontend/src/index.html")
+
+	// Rota para página inicial
+	router.GET("/", func(c *gin.Context) {
+		c.File("./web/frontend/src/index.html")
+	})
 
 	// Rota para SPA
 	router.NoRoute(func(c *gin.Context) {

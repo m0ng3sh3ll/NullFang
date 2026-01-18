@@ -6,10 +6,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +20,13 @@ import (
 	"github.com/m0ng3sh3ll/NullFang/logger"
 	"github.com/m0ng3sh3ll/NullFang/scanner"
 )
+
+// MountedShare represents a mounted SMB share with an optional start path
+type MountedShare struct {
+	Share     *smb2.Share
+	StartPath string
+	ShareName string
+}
 
 // SearchConfig holds the configuration for file searching
 type SearchConfig struct {
@@ -95,6 +104,9 @@ type SearchConfig struct {
 
 	// Maximum date for filtering files
 	MaxDate time.Time
+
+	// Delay entre operações SMB para evitar sobrecarga do servidor
+	OperationDelay time.Duration
 }
 
 // SearchResult represents a search result
@@ -177,16 +189,17 @@ func NewSearchConfig() *SearchConfig {
 		RestrictToShareRoot:     true,
 		Timeout:                 5 * time.Minute, // Default timeout: 5 minutes
 		SkipSpecialShares:       true,
-		MaxDepth:                10,              // Default max depth: 10 levels
-		ExtraVerbose:            false,           // Default to normal verbosity
-		MaxWorkers:              10,              // Default value, will be overwritten by -threads flag
-		BufferSize:              1024 * 1024,     // 1MB buffer
-		DirCacheTTL:             5 * time.Minute, // Directory cache TTL
-		CircuitBreakerThreshold: 5,               // Retry attempts
-		SearchBinary:            false,           // Default to disabled
-		MinBinaryStringLen:      4,               // Default mínimo para extração binária
-		MaxCacheFileSize:        1024 * 1024,     // 1MB default
-		FilterLargeFiles:        false,           // Default to disabled
+		MaxDepth:                10,                     // Default max depth: 10 levels
+		ExtraVerbose:            false,                  // Default to normal verbosity
+		MaxWorkers:              10,                     // Default value, will be overwritten by -threads flag
+		BufferSize:              1024 * 1024,            // 1MB buffer
+		DirCacheTTL:             5 * time.Minute,        // Directory cache TTL
+		CircuitBreakerThreshold: 5,                      // Retry attempts
+		SearchBinary:            false,                  // Default to disabled
+		MinBinaryStringLen:      4,                      // Default mínimo para extração binária
+		MaxCacheFileSize:        1024 * 1024,            // 1MB default
+		FilterLargeFiles:        false,                  // Default to disabled
+		OperationDelay:          500 * time.Millisecond, // Delay padrão entre operações
 	}
 }
 
@@ -235,7 +248,7 @@ func (c *SearchConfig) AddFileExtension(ext string) {
 }
 
 // SearchShare searches a mounted SMB share for files matching the search criteria
-func SearchShare(fs *smb2.Share, shareName string, config *SearchConfig, results chan<- *SearchResult, fileContentCache *scanner.FileContentCache) error {
+func SearchShare(fs *smb2.Share, shareName string, startPath string, config *SearchConfig, results chan<- *SearchResult, fileContentCache *scanner.FileContentCache) error {
 	if config.SkipSpecialShares && isSpecialShare(shareName, config.ExcludedShares) {
 		if config.Verbose {
 			logger.Debug("[*] Skipping special share: %s\n", shareName)
@@ -257,35 +270,38 @@ func SearchShare(fs *smb2.Share, shareName string, config *SearchConfig, results
 		logger.Debug("[KEEP-ALIVE] Goroutine started for share: %s", shareName)
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
+		defer logger.Debug("[KEEP-ALIVE] Goroutine exiting for share: %s", shareName)
 		for {
-			logger.Debug("[KEEP-ALIVE] Loop tick for share: %s", shareName)
 			select {
 			case <-done:
-				logger.Debug("[KEEP-ALIVE] Goroutine exiting for share: %s", shareName)
 				return
 			case <-ticker.C:
-				logger.Debug("[KEEP-ALIVE] Ticker triggered for share: %s", shareName)
-				_, err := fs.Stat(".")
-				if err != nil {
-					logger.Debug("[KEEP-ALIVE] Error keeping SMB session alive: %v", err)
-				} else {
-					logger.Debug("[KEEP-ALIVE] SMB session kept alive successfully")
+				// Verificar novamente se done foi fechado antes de fazer Stat
+				select {
+				case <-done:
+					return
+				default:
+					logger.Debug("[KEEP-ALIVE] Ticker triggered for share: %s", shareName)
+					_, err := fs.Stat(".")
+					if err != nil {
+						logger.Debug("[KEEP-ALIVE] Error keeping SMB session alive: %v", err)
+					} else {
+						logger.Debug("[KEEP-ALIVE] SMB session kept alive successfully")
+					}
 				}
 			}
 		}
 	}()
 	// --- FIM DO KEEP-ALIVE ---
+	defer close(done) // Parar keep-alive quando SearchShare terminar
 
-	logger.Debug("[DEBUG] Starting recursive search in SearchShare")
-	err := searchDirectoryWithContext(ctx, fs, shareName, ".", config, results, 0, wp, dc)
+	logger.Debug("[DEBUG] Starting recursive search in SearchShare at %s", startPath)
+	err := searchDirectoryWithContext(ctx, fs, shareName, startPath, config, results, 0, wp, dc)
 
 	logger.Debug("[DEBUG] Closing job channel after recursive search in SearchShare")
 	close(wp.jobs)
 	wp.wg.Wait()
-
-	// --- FINALIZAÇÃO DO KEEP-ALIVE ---
-	close(done)
-	// --- FIM FINALIZAÇÃO ---
+	logger.Debug("[DEBUG] All workers finished in SearchShare for %s", shareName)
 
 	// close(results)
 	return err
@@ -781,12 +797,45 @@ func searchDirectoryWithContext(ctx context.Context, fs *smb2.Share, shareName, 
 		entriesChan := make(chan []os.FileInfo, 1)
 		errChan := make(chan error, 1)
 		go func() {
-			entries, err := fs.ReadDir(dirPath)
+			// Use Open and Readdir loop instead of ReadDir to avoid blocking for too long
+			// and to better handle large directories
+			f, err := fs.Open(dirPath)
 			if err != nil {
-				errChan <- fmt.Errorf("failed to read directory %s: %v", dirPath, err)
+				errChan <- fmt.Errorf("failed to open directory %s: %v", dirPath, err)
 				return
 			}
-			entriesChan <- entries
+			defer f.Close()
+
+			var allEntries []os.FileInfo
+			batchSize := 1000
+
+			for {
+				select {
+				case <-ctx.Done():
+					errChan <- ctx.Err()
+					return
+				default:
+				}
+
+				batch, err := f.Readdir(batchSize)
+				if len(batch) > 0 {
+					allEntries = append(allEntries, batch...)
+					// Delay com randomização para evitar detecção de padrão
+					randomExtra := time.Duration(rand.Intn(200)) * time.Millisecond
+					time.Sleep(config.OperationDelay + randomExtra)
+				}
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					errChan <- fmt.Errorf("failed to read directory batch %s: %v", dirPath, err)
+					return
+				}
+			}
+
+			// Sort entries to ensure consistent order (match ReadDir behavior)
+			sort.Slice(allEntries, func(i, j int) bool { return allEntries[i].Name() < allEntries[j].Name() })
+			entriesChan <- allEntries
 		}()
 
 		select {
@@ -796,14 +845,37 @@ func searchDirectoryWithContext(ctx context.Context, fs *smb2.Share, shareName, 
 			lastErr = err
 			consecutiveTimeouts = 0 // Reset timeout counter on non-timeout error
 
-			// Verificar se é erro "invalid parameter" - não adianta fazer retry
+			// Verificar se é erro "invalid parameter" - pode ser caso especial
 			errStr := err.Error()
 			isInvalidParameter := strings.Contains(errStr, "invalid parameter") ||
 				strings.Contains(errStr, "STATUS_INVALID_PARAMETER") ||
 				strings.Contains(errStr, "An invalid parameter was passed")
 
 			if isInvalidParameter {
-				// Erro definitivo - marcar como falho e pular
+				// Caso especial: diretório com mesmo nome do share (ex: share TI, diretório TI)
+				// Extrair nome do share
+				shareNameOnly := shareName
+				if strings.Contains(shareName, "\\") {
+					parts := strings.Split(shareName, "\\")
+					if len(parts) > 0 {
+						shareNameOnly = parts[len(parts)-1]
+					}
+				}
+
+				// Se o diretório tem o mesmo nome do share, pode ser problema de path
+				if strings.EqualFold(dirPath, shareNameOnly) {
+					if config.Verbose {
+						fmt.Printf("[WARN] Directory %s matches share name, trying workaround...\n", dirPath)
+					}
+
+					// Tentar com retry (pode funcionar na segunda tentativa)
+					if attempt < 3 {
+						time.Sleep(time.Duration(attempt*2) * time.Second)
+						continue
+					}
+				}
+
+				// Se não é caso especial ou já tentou 3x, pular
 				if config.Verbose {
 					fmt.Printf("[WARN] Directory %s: %v (skipping - invalid parameter error)\n", dirPath, err)
 				}
@@ -909,11 +981,12 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(entries))
 
+EntryLoop:
 	for _, entry := range entries {
 		select {
 		case <-ctx.Done():
 			logger.Debug("[DEBUG] processEntries: ctx.Done() in %s", dirPath)
-			return ctx.Err()
+			break EntryLoop // Break loop to wait for children
 		default:
 		}
 
@@ -942,7 +1015,7 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 					IsDirectory: true,
 				}) {
 					// Contexto cancelado, parar processamento
-					return ctx.Err()
+					break EntryLoop
 				}
 			}
 
@@ -964,6 +1037,9 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 			}(entryPath)
 		} else {
 			logger.Debug("[DEBUG] Sending job to worker pool: %s", entryPath)
+			// Flag para controlar se já houve match (para evitar reportar como large file depois)
+			matched := false
+
 			// Verificar match por extensão primeiro
 			if len(config.FileExtensions) > 0 {
 				ext := strings.ToLower(filepath.Ext(entry.Name()))
@@ -984,11 +1060,16 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 							IsDirectory: false,
 						}) {
 							// Contexto cancelado, parar processamento
-							return ctx.Err()
+							break EntryLoop
 						}
+						matched = true
 						break
 					}
 				}
+			}
+
+			if matched {
+				continue
 			}
 
 			// Se o arquivo for grande, aplica filtro se necessário
@@ -996,14 +1077,10 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 				addLargeFile := true
 				if config.FilterLargeFiles {
 					addLargeFile = false
-					// Verifica extensão
+					// Verifica extensão (suporta múltiplas extensões como .env.prod)
 					if len(config.FileExtensions) > 0 {
-						ext := strings.ToLower(filepath.Ext(entry.Name()))
-						for _, allowedExt := range config.FileExtensions {
-							if strings.EqualFold(ext, allowedExt) {
-								addLargeFile = true
-								break
-							}
+						if matchesAnyExtension(entry.Name(), config.FileExtensions) {
+							addLargeFile = true
 						}
 					}
 					// Verifica padrões de nome
@@ -1026,7 +1103,7 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 						IsDirectory: false,
 					}) {
 						// Contexto cancelado, parar processamento
-						return ctx.Err()
+						break EntryLoop
 					}
 				}
 				continue
@@ -1042,12 +1119,16 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 
 			// Processa o arquivo para outros tipos de match
 			logger.Debug("[DEBUG] Sending job to worker pool: %s", entryPath)
-			wp.jobs <- &FileJob{
+			select {
+			case <-ctx.Done():
+				break EntryLoop
+			case wp.jobs <- &FileJob{
 				fs:        fs,
 				shareName: shareName,
 				filePath:  entryPath,
 				entry:     entry,
 				config:    config,
+			}:
 			}
 		}
 	}
@@ -1068,7 +1149,7 @@ func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath stri
 	}
 }
 
-// SearchMultipleShares searches multiple shares in parallel
+// SearchMultipleShares searches multiple shares concurrently (Legacy: assumes root path)
 func SearchMultipleShares(fs map[string]*smb2.Share, config *SearchConfig, fileContentCache *scanner.FileContentCache) ([]*SearchResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
 	defer cancel()
@@ -1093,7 +1174,7 @@ func SearchMultipleShares(fs map[string]*smb2.Share, config *SearchConfig, fileC
 			defer wg.Done()
 
 			err := cb.Execute(func() error {
-				return SearchShare(fs, name, config, resultsChan, fileContentCache)
+				return SearchShare(fs, name, ".", config, resultsChan, fileContentCache)
 			})
 
 			if err != nil {
@@ -1121,7 +1202,7 @@ func SearchMultipleShares(fs map[string]*smb2.Share, config *SearchConfig, fileC
 	return results, aggregateErrors(errChan)
 }
 
-// Versão que acumula mensagens no slice messages (modo normal)
+// Versão que acumula mensagens no slice messages (Legacy: assumes root path)
 func SearchMultipleSharesWithMessages(fs map[string]*smb2.Share, config *SearchConfig, fileContentCache *scanner.FileContentCache, messages *[]string) ([]*SearchResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
 	defer cancel()
@@ -1146,7 +1227,7 @@ func SearchMultipleSharesWithMessages(fs map[string]*smb2.Share, config *SearchC
 			defer wg.Done()
 
 			err := cb.Execute(func() error {
-				return SearchShare(fs, name, config, resultsChan, fileContentCache)
+				return SearchShare(fs, name, ".", config, resultsChan, fileContentCache)
 			})
 
 			if err != nil {
@@ -1682,6 +1763,40 @@ type readSeekCloser struct {
 
 func (r *readSeekCloser) Close() error { return nil }
 
+// matchesAnyExtension verifica se o arquivo corresponde a qualquer extensão fornecida
+// Suporta múltiplas extensões como .env.prod, .config.json, etc.
+func matchesAnyExtension(filename string, extensions []string) bool {
+	if len(extensions) == 0 {
+		return true
+	}
+
+	filenameLower := strings.ToLower(filename)
+
+	// Dividir o nome do arquivo por pontos para pegar todas as extensões
+	// Ex: "config.env.prod" -> ["config", "env", "prod"]
+	parts := strings.Split(filenameLower, ".")
+
+	for _, ext := range extensions {
+		extLower := strings.ToLower(ext)
+		// Remover ponto inicial se houver
+		extLower = strings.TrimPrefix(extLower, ".")
+
+		// Verificar se o arquivo termina com esta extensão
+		if strings.HasSuffix(filenameLower, "."+extLower) {
+			return true
+		}
+
+		// Verificar se alguma das partes do arquivo corresponde à extensão
+		for _, part := range parts {
+			if part == extLower {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // shouldExcludeFile verifica se o arquivo deve ser excluído com base nos padrões de exclusão
 func shouldExcludeFile(path string, config *SearchConfig) bool {
 	if len(config.ExcludePatterns) == 0 {
@@ -1707,7 +1822,7 @@ func shouldExcludeFile(path string, config *SearchConfig) bool {
 }
 
 // SearchMultipleSharesStream faz busca em múltiplos shares e envia resultados em tempo real para o canal
-func SearchMultipleSharesStream(fs map[string]*smb2.Share, config *SearchConfig, fileContentCache *scanner.FileContentCache, resultsChan chan<- *SearchResult) error {
+func SearchMultipleSharesStream(fs map[string]*MountedShare, config *SearchConfig, fileContentCache *scanner.FileContentCache, resultsChan chan<- *SearchResult) error {
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
 	defer cancel()
 
@@ -1722,18 +1837,18 @@ func SearchMultipleSharesStream(fs map[string]*smb2.Share, config *SearchConfig,
 	var errChanMutex sync.Mutex
 	errChanClosed := false
 
-	for shareName, share := range fs {
+	for shareName, shareInfo := range fs {
 		if config.SkipSpecialShares && isSpecialShare(shareName, config.ExcludedShares) {
 			logger.Debug("Skipping special share: %s", shareName)
 			continue
 		}
 
 		wg.Add(1)
-		go func(name string, fs *smb2.Share) {
+		go func(name string, ms *MountedShare) {
 			defer wg.Done()
 
 			err := cb.Execute(func() error {
-				return SearchShare(fs, name, config, resultsChan, fileContentCache)
+				return SearchShare(ms.Share, name, ms.StartPath, config, resultsChan, fileContentCache)
 			})
 
 			if err != nil {
@@ -1756,7 +1871,7 @@ func SearchMultipleSharesStream(fs map[string]*smb2.Share, config *SearchConfig,
 				}
 				errChanMutex.Unlock()
 			}
-		}(shareName, share)
+		}(shareName, shareInfo)
 	}
 
 	// Aguardar com timeout para evitar travamento
@@ -1769,11 +1884,11 @@ func SearchMultipleSharesStream(fs map[string]*smb2.Share, config *SearchConfig,
 	select {
 	case <-done:
 		logger.Debug("[DEBUG] All shares finished, closing error channel")
-	case <-time.After(30 * time.Second):
+	case <-time.After(5 * time.Minute):
 		logger.Debug("[DEBUG] Timeout waiting for shares to finish, forcing exit")
 	}
 
-	// Fechar errChan após timeout ou conclusão
+	// Fechar errChan exatamente uma vez
 	errChanMutex.Lock()
 	if !errChanClosed {
 		close(errChan)
@@ -1783,11 +1898,11 @@ func SearchMultipleSharesStream(fs map[string]*smb2.Share, config *SearchConfig,
 
 	// NÃO fechar resultsChan aqui - ele é fechado pelo chamador
 
-	// Se há muitos timeouts, retornar erro simples em vez de usar aggregateErrors
+	// Se há muitos timeouts, retornar erro simples
 	if timeoutCount >= 3 {
 		return fmt.Errorf("multiple shares timing out on host")
 	}
 
-	// Usar aggregateErrors com timeout
+	// aggregateErrorsWithTimeout lê do canal já fechado
 	return aggregateErrorsWithTimeout(errChan, 10*time.Second)
 }

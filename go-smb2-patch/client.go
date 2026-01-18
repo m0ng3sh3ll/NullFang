@@ -1956,7 +1956,37 @@ func (f *File) readdir(pattern string) (fi []os.FileInfo, err error) {
 
 	res, err := f.sendRecv(SMB2_QUERY_DIRECTORY, req)
 	if err != nil {
-		return nil, err
+		// PATCH: If query fails with STATUS_INVALID_PARAMETER, try different approaches
+		// mimicking Windows SMB client behavior
+		if rerr, ok := err.(*ResponseError); ok && NtStatus(rerr.Code) == STATUS_INVALID_PARAMETER {
+			// Approach 1: Try with RESTART_SCANS flag (Windows behavior)
+			req.Flags = RESTART_SCANS
+			res, err = f.sendRecv(SMB2_QUERY_DIRECTORY, req)
+			if err == nil {
+				// Success with RESTART_SCANS
+			} else if rerr2, ok2 := err.(*ResponseError); ok2 && NtStatus(rerr2.Code) == STATUS_INVALID_PARAMETER {
+				// Approach 2: Try with REOPEN flag (forces server to reopen enumeration)
+				req.Flags = REOPEN
+				res, err = f.sendRecv(SMB2_QUERY_DIRECTORY, req)
+				if err == nil {
+					// Success with REOPEN
+				} else if rerr3, ok3 := err.(*ResponseError); ok3 && NtStatus(rerr3.Code) == STATUS_INVALID_PARAMETER {
+					// Approach 3: Try with FileBothDirectoryInformation + RESTART_SCANS
+					req.FileInfoClass = FileBothDirectoryInformation
+					req.Flags = RESTART_SCANS
+					res, err = f.sendRecv(SMB2_QUERY_DIRECTORY, req)
+					if err != nil {
+						return nil, err
+					}
+				} else {
+					return nil, err
+				}
+			} else {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 
 	r := QueryDirectoryResponseDecoder(res)
