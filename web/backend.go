@@ -37,9 +37,12 @@ func NewServer(dbPath string) (*Server, error) {
 
 	router := gin.Default()
 
-	// Configurar CORS para desenvolvimento local
+	// CORS restricted to localhost — the web UI must not be exposed to untrusted networks.
 	router.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := c.Request.Header.Get("Origin")
+		if origin == "" || strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if c.Request.Method == "OPTIONS" {
@@ -121,7 +124,7 @@ func NewServer(dbPath string) (*Server, error) {
 }
 
 func (s *Server) Start(port string) error {
-	return s.router.Run(":" + port)
+	return s.router.Run("127.0.0.1:" + port)
 }
 
 // Função para listar domínios disponíveis

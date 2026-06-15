@@ -283,7 +283,7 @@ function loadContent(route) {
                         <div class="col-md-3">
                             <div class="card mb-4">
                                 <div class="card-header">
-                                    <h5 class="card-title mb-0">Filtros</h5>
+                                    <h5 class="card-title mb-0">Filters</h5>
                                 </div>
                                 <div class="card-body">
                                     <div class="mb-3">
@@ -642,7 +642,8 @@ async function showNewRuleModal() {
                                 <label class="form-label">Search Type</label>
                                 <select class="form-select" name="match_type" required>
                                     <option value="regex">Regular Expression</option>
-                                    <option value="exact">Match Exato</option>
+                                    <option value="contains">Contains</option>
+                                    <option value="exact">Exact Match</option>
                                 </select>
                             </div>
                             <div class="mb-3">
@@ -764,7 +765,8 @@ async function editRule(ruleId) {
                                 <label class="form-label">Search Type</label>
                                 <select class="form-select" id="editRuleType" required>
                                     <option value="regex" ${rule.match_type === 'regex' ? 'selected' : ''}>Regular Expression</option>
-                                    <option value="exact" ${rule.match_type === 'exact' ? 'selected' : ''}>Match Exato</option>
+                                    <option value="contains" ${rule.match_type === 'contains' ? 'selected' : ''}>Contains</option>
+                                    <option value="exact" ${rule.match_type === 'exact' ? 'selected' : ''}>Exact Match</option>
                                 </select>
                             </div>
                             <div class="mb-3">
@@ -899,6 +901,7 @@ document.addEventListener('DOMContentLoaded', () => {
     window.applyClassification = applyClassification;
     window.showNewClassificationModal = showNewClassificationModal;
     window.showNewRuleModal = showNewRuleModal;
+    window.createClassification = createClassification;
 });
 
 // Funções de manipulação de classificações
@@ -930,7 +933,7 @@ async function showClassifyModal(fileId) {
                                 </select>
                             </div>
                             <div class="mb-3">
-                                <label class="form-label">Notas</label>
+                                <label class="form-label">Notes</label>
                                 <textarea class="form-control" name="notes" rows="3"></textarea>
                             </div>
                         </form>
@@ -1191,6 +1194,36 @@ function showNewClassificationModal() {
     new bootstrap.Modal(modal).show();
 }
 
+async function createClassification() {
+    const form = document.getElementById('classificationForm');
+    const formData = new FormData(form);
+
+    try {
+        const response = await fetch('/classifications', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: formData.get('name'),
+                description: formData.get('description'),
+                level: parseInt(formData.get('level')),
+                color: formData.get('color')
+            })
+        });
+
+        if (response.ok) {
+            const modal = document.querySelector('.modal.show');
+            if (modal) bootstrap.Modal.getInstance(modal).hide();
+            renderClassificationsTable();
+        } else {
+            const error = await response.json();
+            alert('Error creating classification: ' + error.error);
+        }
+    } catch (error) {
+        console.error('Error creating classification:', error);
+        alert('Error creating classification: ' + error.message);
+    }
+}
+
 async function loadSuggestions() {
     const domainParams = getDomainParams();
     const tbody = document.querySelector('#suggestionsTable tbody');
@@ -1265,7 +1298,7 @@ async function applySuggestion(documentId, classificationId, silent) {
         await fetch('/documents/classify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ document_id: documentId, classification_id: classificationId, notes: 'Sugestão automática' })
+            body: JSON.stringify({ document_id: documentId, classification_id: classificationId, notes: 'Auto-suggestion' })
         });
         if (!silent) {
             alert('Classification applied!');
@@ -1287,10 +1320,10 @@ async function loadInfrastructureData() {
     try {
         // Carregar dados
         const [hosts, users, shares, access] = await Promise.all([
-            fetch('/infrastructure/hosts').then(r => r.json()),
-            fetch('/infrastructure/users').then(r => r.json()),
-            fetch('/infrastructure/shares').then(r => r.json()),
-            fetch('/infrastructure/access').then(r => r.json())
+            fetch('/infrastructure/hosts' + getDomainParams()).then(r => r.json()),
+            fetch('/infrastructure/users' + getDomainParams()).then(r => r.json()),
+            fetch('/infrastructure/shares' + getDomainParams()).then(r => r.json()),
+            fetch('/infrastructure/access' + getDomainParams()).then(r => r.json())
         ]);
         infrastructureGraphData = { hosts, users, shares, access };
         updateInfrastructureStats(hosts, users, shares, access);
@@ -1577,8 +1610,26 @@ function renderInfrastructureGraph() {
 }
 
 function showNodeDetails(node) {
-    // Implementar modal ou painel lateral com detalhes do nó
-    console.log('Node details:', node);
+    if (!node) return;
+    let existing = document.getElementById('nodeDetailToast');
+    if (existing) existing.remove();
+
+    const toast = document.createElement('div');
+    toast.id = 'nodeDetailToast';
+    toast.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;min-width:260px;';
+    toast.innerHTML = `
+        <div class="card shadow">
+            <div class="card-header d-flex justify-content-between align-items-center" style="background:var(--secondary-color);color:white;">
+                <strong>${node.group ? node.group.charAt(0).toUpperCase() + node.group.slice(1) : 'Node'}</strong>
+                <button type="button" class="btn-close btn-close-white btn-sm" onclick="this.closest('#nodeDetailToast').remove()"></button>
+            </div>
+            <div class="card-body">
+                <p class="mb-1"><strong>Label:</strong> ${node.label || '-'}</p>
+                ${node.title ? `<p class="mb-0 text-muted" style="font-size:0.85em;white-space:pre-line;">${node.title}</p>` : ''}
+            </div>
+        </div>
+    `;
+    document.body.appendChild(toast);
 }
 
 async function populateInfrastructure() {
@@ -1649,7 +1700,7 @@ function updateInfrastructureStats(hosts, users, shares, access) {
             <p class="mb-0">Accessible: ${accessibleShares}</p>
         </div>
         <div>
-            <h6>Acessos</h6>
+            <h6>Access</h6>
             <p class="mb-0">Total: ${totalAccesses}</p>
             <p class="mb-0">Admin: ${adminAccesses}</p>
         </div>
@@ -1668,43 +1719,3 @@ function setupInfrastructureFilters() {
         }
     });
 }
-
-// Event Listeners
-document.addEventListener('DOMContentLoaded', () => {
-    // Carregar domínios disponíveis
-    loadDomains();
-    
-    // Configurar event listener para o seletor de domínio
-    document.getElementById('domainSelector').addEventListener('change', (e) => {
-        updateSelectedDomain(e.target.value);
-    });
-
-    // Carregar classificações quando o modal for aberto
-    document.getElementById('classificationModal').addEventListener('show.bs.modal', loadClassifications);
-
-    // Configurar navegação
-    document.querySelectorAll('a[href^="/"]').forEach(link => {
-        link.addEventListener('click', (e) => {
-            e.preventDefault();
-            navigate(link.getAttribute('href'));
-        });
-    });
-
-    // Configurar navegação do histórico
-    window.addEventListener('popstate', () => {
-        loadContent(window.location.pathname);
-    });
-
-    // Carregar conteúdo inicial
-    const initialRoute = window.location.pathname || '/';
-    loadContent(initialRoute);
-
-    // Adicione outras funções usadas em onclick conforme necessário
-    window.navigate = navigate;
-    window.populateInfrastructure = populateInfrastructure;
-    window.classifySelected = classifySelected;
-    window.autoClassifyDocuments = autoClassifyDocuments;
-    window.applyClassification = applyClassification;
-    window.showNewClassificationModal = showNewClassificationModal;
-    window.showNewRuleModal = showNewRuleModal;
-});
