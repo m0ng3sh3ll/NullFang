@@ -1,0 +1,276 @@
+# nullfang.yaml — Advanced configuration template
+#
+# Pass this file with: nullfang -config nullfang.yaml ...
+#
+# This file has two sections:
+#   patterns:  keyword lists, regex, extensions, and leet-speak map
+#   settings:  execution tuning (performance, search, stealth, network)
+#
+# CLI flags always win over settings: block values.
+# --stealth always wins over both.
+# Unset / zero fields keep compiled-in defaults.
+
+# ─────────────────────────────────────────────────────
+#  PATTERNS
+#  What to look for. Merged with -m / -r / -e CLI flags:
+#  if you pass -m on CLI, the credentials list here is ignored.
+# ─────────────────────────────────────────────────────
+patterns:
+  # Credential/secret keyword list.
+  # Matched against file names and (in search/exfil mode) file content.
+  credentials:
+    - password
+    - passwd
+    - secret
+    - credential
+    - api_key
+    - apikey
+    - private_key
+    - access_token
+    - bearer
+    - auth_token
+    - connection_string
+    - database_password
+    - db_pass
+    - smtp_pass
+    - ftp_pass
+    - ssh_key
+    - rsa_key
+    - wallet
+    - seed_phrase
+    - mnemonic
+
+  # Sensitive document/data keywords.
+  sensitive:
+    - confidential
+    - internal_only
+    - do_not_share
+    - personnel
+    - salary
+    - payroll
+    - ssn
+    - social_security
+    - bank_account
+    - credit_card
+    - pii
+    - gdpr
+    - hipaa
+    - classified
+
+  # File extensions to match (without leading dot).
+  # Files with these extensions are flagged regardless of content.
+  extensions:
+    - xlsx
+    - xls
+    - docx
+    - doc
+    - pdf
+    - kdbx          # KeePass database
+    - key           # SSH / PGP private keys
+    - pem
+    - pfx
+    - p12
+    - conf
+    - config
+    - ini
+    - env
+    - ovpn          # OpenVPN config
+    - rdp
+    - sql
+    - bak
+    - dump
+    - zip
+    - tar
+    - 7z
+
+  # Regex patterns matched against file content.
+  # Standard Go regex syntax (RE2 — no lookaheads).
+  regex:
+    - '(?i)(password|passwd)\s*[=:]\s*\S+'
+    - '(?i)api[_-]?key\s*[=:]\s*[A-Za-z0-9+/]{20,}'
+    - '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----'
+    - 'AKIA[0-9A-Z]{16}'                          # AWS access key ID
+    - '(?i)connection\s+string\s*[=:]\s*.{10,}'
+
+  # Leet-speak substitution table.
+  # Used when -leet flag is passed or settings.search.leet_speak: true.
+  # Keys are lowercase chars; values are their leet substitutions.
+  leet_speak_map:
+    a: ["4", "@"]
+    e: ["3"]
+    i: ["1", "!"]
+    o: ["0"]
+    s: ["5", "$"]
+    t: ["7"]
+    l: ["1"]
+    g: ["9"]
+
+  # Per-file search tuning (optional override of CLI defaults).
+  # These are overridden by the settings: block below if both are set.
+  search_config:
+    case_sensitive: false
+    max_file_size: 10485760    # 10 MB
+    max_depth: 10
+    exclude:
+      - "*.lnk"
+      - "desktop.ini"
+      - "thumbs.db"
+      - "*.tmp"
+    excluded_shares:
+      - "IPC$"
+      - "print$"
+
+
+# ─────────────────────────────────────────────────────
+#  SETTINGS
+#  All fields are optional. Zero value = use compiled default.
+#  CLI flags and --stealth override these at runtime.
+# ─────────────────────────────────────────────────────
+settings:
+
+  # ── Performance ─────────────────────────────────────
+  performance:
+    # Concurrent host scan goroutines.
+    # Default: 10. Stealth forces: 1.
+    # Lower on slow networks or to reduce noise. Higher only on LAN with many hosts.
+    threads: 10
+
+    # Per-host scan timeout. Go duration string: "5m", "30s", "2m30s".
+    # Default: "5m". Increase for large shares over slow WAN.
+    timeout: "5m"
+
+    # Per-file copy timeout. Default: "2m".
+    # Increase when exfiltrating large files over limited bandwidth.
+    copy_timeout: "2m"
+
+    # SMB session-setup timeout. Default: "30s".
+    # Lower (e.g. "5s") for fast host-up/down detection in recon mode.
+    auth_timeout: "30s"
+
+    # SMB connection pool size per host.
+    # Default: 5. Stealth forces: 1.
+    # Higher = faster parallel share access; each conn uses ~1 SMB session.
+    max_conns_per_host: 5
+
+    # Global cap on in-flight SMB operations across all hosts.
+    # Default: 10. Stealth forces: 1.
+    max_concurrent: 10
+
+    # Read chunk for large files. Accepts suffixes: k, m.
+    # Default: "1m". Increase ("4m") for faster exfil on LAN.
+    chunk_size: "1m"
+
+    # I/O buffer per operation. Default: "32k".
+    # Rarely needs changing — increase for sequential reads on gigabit LAN.
+    buffer_size: "32k"
+
+    # In-memory LRU content-cache entries. Default: 512.
+    # Increase when the same small files are read many times (e.g. DFS shares).
+    lru_cache_size: 512
+
+    # Operations per batch flush (used with batch_mode). Default: 100.
+    batch_size: 100
+
+    # Files per mini-batch in batch mode. Default: 10.
+    mini_batch_size: 10
+
+    # Batch flush interval. Default: "2s".
+    batch_timeout: "2s"
+
+    # Enable batched file copy to reduce SMB round-trips. Default: false.
+    # Recommended when exfiltrating many small files.
+    batch_mode: false
+
+    # Enable per-host bandwidth cap. Default: false.
+    per_host_limit: false
+
+    # Bandwidth cap per host when per_host_limit is true.
+    # Accepts suffixes: k, m. Example: "5m" = 5 MB/s per host.
+    max_host_bandwidth: "10m"
+
+  # ── Search ──────────────────────────────────────────
+  search:
+    # Max file size in bytes to inspect content. Default: 10485760 (10 MB).
+    # Files above this are listed/flagged but not content-searched.
+    max_size: 10485760
+
+    # Max directory recursion depth. Default: 10.
+    # Set to 1-3 for shallow share-root recon; unlimited = 0.
+    max_depth: 10
+
+    # Case-sensitive pattern matching. Default: false.
+    case_sensitive: false
+
+    # Generate leet-speak variants of -m patterns. Default: false.
+    # Useful for catching obfuscated passwords (p@ssw0rd, pa55word, etc.).
+    leet_speak: false
+
+    # Extract printable strings from binary/executable files. Default: false.
+    # Slow — only enable when targeting executables, firmware, or memory dumps.
+    binary: false
+
+    # Minimum printable-string length during binary extraction. Default: 4.
+    min_binary_string: 4
+
+    # Max file size (bytes) to keep in LRU content cache. Default: 1048576 (1 MB).
+    # Files above this are read directly each time (no cache).
+    max_cache_file_size: 1048576
+
+    # File name patterns to skip during copy (glob syntax).
+    # Applied in addition to -exclude-share CLI flag.
+    exclude_patterns:
+      - "*.lnk"
+      - "*.tmp"
+      - "desktop.ini"
+      - "thumbs.db"
+
+    # Only process files modified on or after this date (YYYY-MM-DD).
+    # Empty = no lower bound. Use with delta mode for incremental scans.
+    min_date: ""
+
+    # Only process files modified on or before this date (YYYY-MM-DD).
+    # Empty = no upper bound.
+    max_date: ""
+
+  # ── Stealth ─────────────────────────────────────────
+  # Individual controls for fine-tuning stealth behavior.
+  # --stealth CLI flag sets all of these to human-like defaults automatically.
+  stealth:
+    # Base delay (ms) between directory entries.
+    # Fed into humanBrowseDelay() which adds asymmetric jitter:
+    #   70% of ops → 50–120% of this value  (fast, normal browsing)
+    #   25% of ops → 150–400% of this value (pause, as if reading)
+    #    5% of ops → 500–1000% of this value (long pause, distraction)
+    # Default: 0 (disabled). --stealth sets: 500.
+    # Guide: 100 = light, 300 = moderate, 500 = realistic human, 1000 = very slow.
+    operation_delay_ms: 0
+
+    # Max random delay (ms) between share mounts (uniform distribution).
+    # Independent from operation_delay_ms — controls share-to-share pacing.
+    # Default: 0. --stealth sets: 500.
+    share_jitter_ms: 0
+
+    # Restore file atime (last-access time) after content read.
+    # Requires write-attr permission on the share. Default: false.
+    # --stealth enables. Prevents access-time forensic artifacts.
+    preserve_atime: false
+
+    # Set to true to scan shares/directories in fixed order.
+    # Default: false (randomized order). Randomization is stealth-friendly.
+    disable_randomize: false
+
+    # Set to true to process honeypot / canary files.
+    # Default: false (canary files are SKIPPED). Only enable for research.
+    disable_canary_skip: false
+
+  # ── Network ─────────────────────────────────────────
+  network:
+    # Force a specific SMB dialect. Default: "" (auto-negotiate, server picks best).
+    # Valid values: SMB311, SMB302, SMB300, SMB210, SMB202.
+    # Only set if a target has compatibility issues with SMB 3.1.1.
+    smb_dialect: ""
+
+    # Force SMB signing. Default: "" (follow server policy — sign only if required).
+    # Valid values: "on" (always sign), "off" (never sign, may fail on DC shares).
+    # Leave empty unless debugging relay / signing-negotiation issues.
+    smb_signing: ""

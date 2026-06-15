@@ -1,0 +1,10 @@
+﻿.vscode/
+wiki/
+Obsidian/
+Extras/
+.claude/
+*.exe
+/nullfang
+/nfpath/nfpath
+*.db
+Claude.md
