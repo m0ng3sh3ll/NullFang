@@ -118,6 +118,11 @@ func NewServer(dbPath string) (*Server, error) {
 		api.GET("/infrastructure/shares", server.listInfrastructureShares)
 		api.GET("/infrastructure/access", server.listInfrastructureAccess)
 		api.POST("/infrastructure/populate", server.populateInfrastructure)
+		api.GET("/infrastructure/nodes/files", server.getNodeFiles)
+		api.GET("/infrastructure/nodes/user-access", server.getNodeUserAccess)
+
+		// Report
+		api.GET("/report/data", server.getReportData)
 	}
 
 	return server, nil
@@ -1195,4 +1200,130 @@ func (s *Server) populateInfrastructure(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Infraestrutura atualizada com sucesso"})
+}
+
+// getNodeFiles returns files associated with a given host or share node.
+// Query params: type=host|share, name=<label>, domain=<domain>
+func (s *Server) getNodeFiles(c *gin.Context) {
+	nodeType := c.Query("type")
+	name := c.Query("name")
+	domain := c.Query("domain")
+
+	if nodeType != "host" && nodeType != "share" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "type must be 'host' or 'share'"})
+		return
+	}
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	col := "f.host"
+	if nodeType == "share" {
+		col = "f.share"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT f.id, f.path, f.host, f.share, COALESCE(f.domain,'') as domain,
+		       f.size, COALESCE(f.mod_time,'') as mod_time,
+		       COALESCE(c.name,'') as class_name, COALESCE(c.color,'') as class_color
+		FROM files f
+		LEFT JOIN document_classifications dc ON f.id = dc.file_id
+		LEFT JOIN classifications c ON dc.classification_id = c.id
+		WHERE %s = ?`, col)
+	args := []interface{}{name}
+	if domain != "" {
+		query += " AND f.domain = ?"
+		args = append(args, domain)
+	}
+	query += " ORDER BY c.level ASC, f.path LIMIT 100"
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var files []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var path, host, share, domain2, modTime, className, classColor string
+		var size int64
+		if err := rows.Scan(&id, &path, &host, &share, &domain2, &size, &modTime, &className, &classColor); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		files = append(files, map[string]interface{}{
+			"id": id, "path": path, "host": host, "share": share,
+			"domain": domain2, "size": size, "mod_time": modTime,
+			"classification_name": className, "classification_color": classColor,
+		})
+	}
+	if files == nil {
+		files = []map[string]interface{}{}
+	}
+	c.JSON(http.StatusOK, files)
+}
+
+// getNodeUserAccess returns access relationships for a given user node.
+// Query params: username=<label>, domain=<domain>
+func (s *Server) getNodeUserAccess(c *gin.Context) {
+	username := c.Query("username")
+	domain := c.Query("domain")
+
+	if username == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username is required"})
+		return
+	}
+
+	query := `
+		SELECT a.access_type, COALESCE(a.first_seen,'') as first_seen, COALESCE(a.last_seen,'') as last_seen,
+		       CASE WHEN a.target_type='host' THEN h.host ELSE sh.name END as target_name,
+		       a.target_type
+		FROM infrastructure_access a
+		JOIN infrastructure_users u ON a.user_id = u.id
+		LEFT JOIN infrastructure_hosts h ON a.target_type='host' AND a.target_id = h.id
+		LEFT JOIN infrastructure_shares sh ON a.target_type='share' AND a.target_id = sh.id
+		WHERE u.username = ?`
+	args := []interface{}{username}
+	if domain != "" {
+		query += " AND u.domain = ?"
+		args = append(args, domain)
+	}
+	query += " ORDER BY a.access_type, target_name"
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var accesses []map[string]interface{}
+	for rows.Next() {
+		var accessType, firstSeen, lastSeen, targetName, targetType string
+		if err := rows.Scan(&accessType, &firstSeen, &lastSeen, &targetName, &targetType); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		accesses = append(accesses, map[string]interface{}{
+			"access_type": accessType, "first_seen": firstSeen,
+			"last_seen": lastSeen, "target_name": targetName, "target_type": targetType,
+		})
+	}
+	if accesses == nil {
+		accesses = []map[string]interface{}{}
+	}
+	c.JSON(http.StatusOK, accesses)
+}
+
+func (s *Server) getReportData(c *gin.Context) {
+	domain := c.Query("domain")
+	data, err := database.GetReportData(s.db, domain)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, data)
 }

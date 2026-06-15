@@ -1,6 +1,27 @@
 // Variáveis globais
 let selectedDomain = '';
 let availableDomains = [];
+let allDocuments = [];
+let currentPage = 0;
+const PAGE_SIZE = 50;
+
+function showToast(message, type) {
+    type = type || 'success';
+    let container = document.getElementById('toastContainer');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'toastContainer';
+        container.style.cssText = 'position:fixed;top:20px;right:20px;z-index:11000;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
+        document.body.appendChild(container);
+    }
+    const toast = document.createElement('div');
+    const bg = type === 'error' ? '#dc3545' : type === 'warning' ? '#ffc107' : type === 'info' ? '#17a2b8' : '#28a745';
+    const textColor = type === 'warning' ? '#000' : '#fff';
+    toast.style.cssText = `background:${bg};color:${textColor};padding:12px 16px;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.3);min-width:240px;max-width:380px;display:flex;justify-content:space-between;align-items:center;pointer-events:auto;font-size:0.9em;`;
+    toast.innerHTML = `<span>${message}</span><button onclick="this.parentElement.remove()" style="background:none;border:none;color:inherit;font-size:1.2em;cursor:pointer;margin-left:12px;line-height:1;">×</button>`;
+    container.appendChild(toast);
+    setTimeout(() => { if (toast.parentElement) toast.remove(); }, 4000);
+}
 
 // Função para carregar domínios disponíveis
 async function loadDomains() {
@@ -75,7 +96,8 @@ const routes = {
     '/analysis': 'analysis',
     '/settings': 'settings',
     '/suggestions': 'suggestions',
-    '/infrastructure': 'infrastructure'
+    '/infrastructure': 'infrastructure',
+    '/report': 'report'
 };
 
 // Função para navegação
@@ -122,9 +144,10 @@ function loadContent(route) {
             mainContent.innerHTML = `
                 <div class="container mt-4">
                     <h2>Documents</h2>
-                    <div class="mb-3">
+                    <div class="mb-3 d-flex gap-2 align-items-center flex-wrap">
                         <button class="btn btn-primary" onclick="classifySelected()">Classify Selected</button>
                         <button class="btn btn-secondary" onclick="autoClassifyDocuments()">Classify Automatically</button>
+                        <div id="documentsPagination" class="ms-auto d-flex align-items-center gap-2"></div>
                     </div>
                     <div class="table-responsive">
                         <table class="table table-striped" id="documentsTable">
@@ -145,7 +168,7 @@ function loadContent(route) {
                                     <th>Actions</th>
                                 </tr>
                             </thead>
-                            <tbody></tbody>
+                            <tbody><tr><td colspan="13" class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div> Loading...</td></tr></tbody>
                         </table>
                     </div>
                 </div>
@@ -346,6 +369,23 @@ function loadContent(route) {
             loadInfrastructureData();
             break;
 
+        case '/report':
+            mainContent.innerHTML = `
+                <div class="container mt-4">
+                    <div class="d-flex justify-content-between align-items-center mb-4">
+                        <h2>Report</h2>
+                        <button class="btn btn-success" onclick="downloadReport()">
+                            <i class="bi bi-download"></i> Download HTML
+                        </button>
+                    </div>
+                    <div id="reportContent">
+                        <div class="text-center py-5"><div class="spinner-border" role="status"></div><p class="mt-2 text-muted">Generating report...</p></div>
+                    </div>
+                </div>
+            `;
+            loadReportData();
+            break;
+
         default:
             mainContent.innerHTML = '<div class="container mt-4"><h2>Page not found</h2></div>';
     }
@@ -380,56 +420,106 @@ function getClassificationColor(level) {
 
 // Funções de carregamento de dados
 function loadDocuments() {
+    currentPage = 0;
     const domainParams = getDomainParams();
     fetch(`/documents${domainParams}`)
         .then(response => response.json())
         .then(documents => {
-            const tbody = document.querySelector('#documentsTable tbody');
-            tbody.innerHTML = '';
-            
-            documents.forEach(doc => {
-                const tr = document.createElement('tr');
-                tr.innerHTML = `
-                    <td><input type="checkbox" class="document-checkbox" data-id="${doc.id}"></td>
-                    <td>${doc.name}</td>
-                    <td>${doc.host || ''}</td>
-                    <td>${doc.share || ''}</td>
-                    <td>${doc.domain || ''}</td>
-                    <td>${formatSize(doc.size)}</td>
-                    <td>${doc.last_modified}</td>
-                    <td>${doc.search_param_type || ''}</td>
-                    <td>${doc.search_param_value || ''}</td>
-                    <td>${doc.match_pattern || ''}</td>
-                    <td>${doc.match_type || ''}</td>
-                    <td>
-                        ${doc.classification ? 
-                            `<span class="badge" style="background-color: ${doc.classification.color}">${doc.classification.name}</span>` 
-                            : '<span class="badge bg-secondary">Not classified</span>'}
-                    </td>
-                    <td>
-                        <button class="btn btn-sm btn-primary" onclick="classifyDocument(${doc.id})">
-                            Classify
-                        </button>
-                    </td>
-                `;
-                tbody.appendChild(tr);
-            });
-
-            // Adicionar evento para o checkbox "Selecionar Todos"
-            const selectAllCheckbox = document.querySelector('#selectAll');
-            if (selectAllCheckbox) {
-                selectAllCheckbox.addEventListener('change', function() {
-                    const checkboxes = document.querySelectorAll('.document-checkbox');
-                    checkboxes.forEach(checkbox => {
-                        checkbox.checked = this.checked;
-                    });
-                });
-            }
+            allDocuments = documents || [];
+            renderDocumentsPage();
         })
         .catch(error => {
             console.error('Error loading documents:', error);
-            alert('Error loading documents. Please try again.');
+            showToast('Error loading documents. Please try again.', 'error');
+            const tbody = document.querySelector('#documentsTable tbody');
+            if (tbody) tbody.innerHTML = '<tr><td colspan="13" class="text-center text-danger">Error loading documents.</td></tr>';
         });
+}
+
+function renderDocumentsPage() {
+    const tbody = document.querySelector('#documentsTable tbody');
+    if (!tbody) return;
+
+    const start = currentPage * PAGE_SIZE;
+    const end = Math.min(start + PAGE_SIZE, allDocuments.length);
+    const pageDocuments = allDocuments.slice(start, end);
+
+    tbody.innerHTML = '';
+    pageDocuments.forEach(doc => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td><input type="checkbox" class="document-checkbox" data-id="${doc.id}"></td>
+            <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${doc.name || ''}">${doc.name || ''}</td>
+            <td>${doc.host || ''}</td>
+            <td>${doc.share || ''}</td>
+            <td>${doc.domain || ''}</td>
+            <td>${formatSize(doc.size)}</td>
+            <td>${doc.last_modified ? new Date(doc.last_modified).toLocaleDateString() : ''}</td>
+            <td>${doc.search_param_type || ''}</td>
+            <td>${doc.search_param_value || ''}</td>
+            <td>${doc.match_pattern || ''}</td>
+            <td>${doc.match_type || ''}</td>
+            <td>
+                ${doc.classification ?
+                    `<span class="badge" style="background-color: ${doc.classification.color}">${doc.classification.name}</span>`
+                    : '<span class="badge bg-secondary">Unclassified</span>'}
+            </td>
+            <td>
+                <button class="btn btn-sm btn-primary" onclick="classifyDocument(${doc.id})">Classify</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    updateDocumentsPagination();
+
+    const selectAllCheckbox = document.querySelector('#selectAll');
+    if (selectAllCheckbox) {
+        selectAllCheckbox.addEventListener('change', function() {
+            document.querySelectorAll('.document-checkbox').forEach(cb => { cb.checked = this.checked; });
+        });
+    }
+}
+
+function updateDocumentsPagination() {
+    const paginationDiv = document.getElementById('documentsPagination');
+    if (!paginationDiv) return;
+
+    const totalPages = Math.ceil(allDocuments.length / PAGE_SIZE);
+    if (totalPages <= 1) {
+        paginationDiv.innerHTML = `<small class="text-muted">${allDocuments.length} files</small>`;
+        return;
+    }
+
+    const maxButtons = 7;
+    let startPage = Math.max(0, currentPage - Math.floor(maxButtons / 2));
+    let endPage = Math.min(totalPages, startPage + maxButtons);
+    if (endPage - startPage < maxButtons) startPage = Math.max(0, endPage - maxButtons);
+
+    let buttons = '';
+    for (let i = startPage; i < endPage; i++) {
+        buttons += `<li class="page-item ${i === currentPage ? 'active' : ''}">
+            <button class="page-link" onclick="changePage(${i})">${i + 1}</button></li>`;
+    }
+
+    paginationDiv.innerHTML = `
+        <nav><ul class="pagination pagination-sm mb-0">
+            <li class="page-item ${currentPage === 0 ? 'disabled' : ''}">
+                <button class="page-link" onclick="changePage(${currentPage - 1})">«</button></li>
+            ${buttons}
+            <li class="page-item ${currentPage >= totalPages - 1 ? 'disabled' : ''}">
+                <button class="page-link" onclick="changePage(${currentPage + 1})">»</button></li>
+        </ul></nav>
+        <small class="text-muted">${currentPage * PAGE_SIZE + 1}–${Math.min((currentPage + 1) * PAGE_SIZE, allDocuments.length)} of ${allDocuments.length}</small>
+    `;
+}
+
+function changePage(page) {
+    const totalPages = Math.ceil(allDocuments.length / PAGE_SIZE);
+    if (page < 0 || page >= totalPages) return;
+    currentPage = page;
+    renderDocumentsPage();
+    document.querySelector('#documentsTable')?.scrollIntoView({ behavior: 'smooth' });
 }
 
 async function loadAnalysisCharts() {
@@ -519,18 +609,12 @@ async function loadAnalysisCharts() {
 function loadClassifications() {
     fetch('/classifications')
         .then(response => {
-            if (!response.ok) {
-                throw new Error('Error loading classifications');
-            }
+            if (!response.ok) throw new Error('Error loading classifications');
             return response.json();
         })
         .then(classifications => {
             const select = document.getElementById('classificationSelect');
-            if (!select) {
-                console.error('Element classificationSelect not found');
-                return;
-            }
-            
+            if (!select) return;
             select.innerHTML = '<option value="">Select a classification...</option>';
             classifications.forEach(c => {
                 const option = document.createElement('option');
@@ -541,7 +625,7 @@ function loadClassifications() {
         })
         .catch(error => {
             console.error('Error loading classifications:', error);
-            alert('Error loading classifications. Please try again.');
+            showToast('Error loading classifications.', 'error');
         });
 }
 
@@ -704,19 +788,19 @@ async function createRule() {
 
         if (response.ok) {
             loadRules();
-            // Fechar o modal de criação
             const createModal = document.querySelector('.modal:not([data-rule-edit])');
             if (createModal) {
                 bootstrap.Modal.getInstance(createModal).hide();
                 createModal.remove();
             }
+            showToast('Rule created successfully.');
         } else {
             const error = await response.json();
-            alert('Error creating rule: ' + error.error);
+            showToast('Error creating rule: ' + error.error, 'error');
         }
     } catch (error) {
         console.error('Error creating rule:', error);
-        alert('Error creating rule: ' + error.message);
+        showToast('Error creating rule: ' + error.message, 'error');
     }
 }
 
@@ -795,7 +879,7 @@ async function editRule(ruleId) {
         new bootstrap.Modal(modal).show();
     } catch (error) {
         console.error('Error loading rule:', error);
-        alert('Error loading rule for editing: ' + error.message);
+        showToast('Error loading rule for editing.', 'error');
     }
 }
 
@@ -826,19 +910,19 @@ async function updateRule(ruleId) {
 
         if (response.ok) {
             loadRules();
-            // Fechar o modal de edição
             const editModal = document.querySelector('.modal[data-rule-edit]');
             if (editModal) {
                 bootstrap.Modal.getInstance(editModal).hide();
                 editModal.remove();
             }
+            showToast('Rule updated successfully.');
         } else {
             const error = await response.json();
-            alert('Error updating rule: ' + error.error);
+            showToast('Error updating rule: ' + error.error, 'error');
         }
     } catch (error) {
         console.error('Error updating rule:', error);
-        alert('Error updating rule: ' + error.message);
+        showToast('Error updating rule: ' + error.message, 'error');
     }
 }
 
@@ -854,12 +938,14 @@ async function deleteRule(ruleId) {
 
         if (response.ok) {
             loadRules();
+            showToast('Rule deleted.');
         } else {
             const error = await response.json();
-            alert('Error deleting rule: ' + error.error);
+            showToast('Error deleting rule: ' + error.error, 'error');
         }
     } catch (error) {
         console.error('Error deleting rule:', error);
+        showToast('Error deleting rule.', 'error');
     }
 }
 
@@ -902,6 +988,12 @@ document.addEventListener('DOMContentLoaded', () => {
     window.showNewClassificationModal = showNewClassificationModal;
     window.showNewRuleModal = showNewRuleModal;
     window.createClassification = createClassification;
+    window.changePage = changePage;
+    window.downloadReport = downloadReport;
+    window.editRule = editRule;
+    window.updateRule = updateRule;
+    window.deleteRule = deleteRule;
+    window.applySuggestion = applySuggestion;
 });
 
 // Funções de manipulação de classificações
@@ -1098,7 +1190,7 @@ async function classifyDocument(documentId) {
 async function classifySelected() {
     const checkboxes = document.querySelectorAll('.document-checkbox:checked');
     if (checkboxes.length === 0) {
-        alert('Please select at least one document to classify.');
+        showToast('Please select at least one document to classify.', 'warning');
         return;
     }
 
@@ -1136,19 +1228,16 @@ function applyClassification() {
 
     Promise.all(promises)
         .then(() => {
-            alert('Documents classified successfully!');
-            loadDocuments(); // Recarregar a lista
+            showToast('Documents classified successfully!');
+            loadDocuments();
             const modal = bootstrap.Modal.getInstance(document.getElementById('classificationModal'));
-            if (modal) {
-                modal.hide();
-            }
-            // Limpar os campos do modal
+            if (modal) modal.hide();
             document.getElementById('classificationSelect').value = '';
             document.getElementById('classificationNotes').value = '';
         })
         .catch(error => {
             console.error('Error classifying documents:', error);
-            alert('Error classifying documents. Please try again.');
+            showToast('Error classifying documents. Please try again.', 'error');
         });
 }
 
@@ -1214,13 +1303,14 @@ async function createClassification() {
             const modal = document.querySelector('.modal.show');
             if (modal) bootstrap.Modal.getInstance(modal).hide();
             renderClassificationsTable();
+            showToast('Classification created.');
         } else {
             const error = await response.json();
-            alert('Error creating classification: ' + error.error);
+            showToast('Error creating classification: ' + error.error, 'error');
         }
     } catch (error) {
         console.error('Error creating classification:', error);
-        alert('Error creating classification: ' + error.message);
+        showToast('Error creating classification: ' + error.message, 'error');
     }
 }
 
@@ -1277,7 +1367,6 @@ async function loadSuggestions() {
     } catch (error) {
         tbody.innerHTML = '<tr><td colspan="4">Error loading suggestions.</td></tr>';
     }
-    // Evento para aplicar todas as sugestões
     const btnAll = document.getElementById('applyAllSuggestions');
     if (btnAll) {
         btnAll.onclick = async () => {
@@ -1288,7 +1377,7 @@ async function loadSuggestions() {
                 await applySuggestion(s.id, s.suggested_classification.id, true);
             }
             loadSuggestions();
-            alert('Suggestions applied!');
+            showToast(`${toApply.length} suggestion(s) applied!`);
         };
     }
 }
@@ -1301,11 +1390,11 @@ async function applySuggestion(documentId, classificationId, silent) {
             body: JSON.stringify({ document_id: documentId, classification_id: classificationId, notes: 'Auto-suggestion' })
         });
         if (!silent) {
-            alert('Classification applied!');
+            showToast('Classification applied!');
             loadSuggestions();
         }
     } catch (error) {
-        if (!silent) alert('Error applying suggestion.');
+        if (!silent) showToast('Error applying suggestion.', 'error');
     }
 }
 
@@ -1332,7 +1421,7 @@ async function loadInfrastructureData() {
         setupInfrastructureFilters();
     } catch (error) {
         console.error('Error loading infrastructure data:', error);
-        alert('Error loading infrastructure data. Please try again.');
+        showToast('Error loading infrastructure data.', 'error');
     }
 }
 
@@ -1611,43 +1700,109 @@ function renderInfrastructureGraph() {
 
 function showNodeDetails(node) {
     if (!node) return;
-    let existing = document.getElementById('nodeDetailToast');
+
+    let existing = document.getElementById('nodeDetailPanel');
     if (existing) existing.remove();
 
-    const toast = document.createElement('div');
-    toast.id = 'nodeDetailToast';
-    toast.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;min-width:260px;';
-    toast.innerHTML = `
+    const nodeId = (node.id || '').toString();
+    const parts = nodeId.split('_');
+    const nodeType = parts[0]; // 'host', 'user', 'share', 'domain'
+
+    const panel = document.createElement('div');
+    panel.id = 'nodeDetailPanel';
+    panel.style.cssText = 'position:fixed;top:80px;right:20px;z-index:9999;min-width:320px;max-width:460px;max-height:80vh;overflow-y:auto;';
+    panel.innerHTML = `
         <div class="card shadow">
             <div class="card-header d-flex justify-content-between align-items-center" style="background:var(--secondary-color);color:white;">
-                <strong>${node.group ? node.group.charAt(0).toUpperCase() + node.group.slice(1) : 'Node'}</strong>
-                <button type="button" class="btn-close btn-close-white btn-sm" onclick="this.closest('#nodeDetailToast').remove()"></button>
+                <strong>${nodeType ? nodeType.charAt(0).toUpperCase() + nodeType.slice(1) : 'Node'}: ${node.label || '-'}</strong>
+                <button type="button" class="btn-close btn-close-white btn-sm" onclick="document.getElementById('nodeDetailPanel').remove()"></button>
             </div>
-            <div class="card-body">
-                <p class="mb-1"><strong>Label:</strong> ${node.label || '-'}</p>
-                ${node.title ? `<p class="mb-0 text-muted" style="font-size:0.85em;white-space:pre-line;">${node.title}</p>` : ''}
+            <div class="card-body p-2">
+                ${node.title ? `<p class="text-muted mb-2" style="font-size:0.82em;white-space:pre-line;">${node.title}</p>` : ''}
+                <div id="nodeDetailContent">
+                    <div class="text-center py-2"><div class="spinner-border spinner-border-sm" role="status"></div> Loading...</div>
+                </div>
             </div>
         </div>
     `;
-    document.body.appendChild(toast);
+    document.body.appendChild(panel);
+    loadNodeDetailData(nodeType, node.label, panel);
+}
+
+async function loadNodeDetailData(nodeType, label, panel) {
+    const content = panel.querySelector('#nodeDetailContent');
+    const domain = encodeURIComponent(selectedDomain || '');
+
+    try {
+        if (nodeType === 'host' || nodeType === 'share') {
+            const resp = await fetch(`/infrastructure/nodes/files?type=${nodeType}&name=${encodeURIComponent(label)}&domain=${domain}`);
+            const files = await resp.json();
+
+            if (!files || files.length === 0) {
+                content.innerHTML = '<p class="text-muted text-center mb-0">No files found.</p>';
+                return;
+            }
+            content.innerHTML = `
+                <p class="mb-1"><strong>Files found: ${files.length}</strong></p>
+                <div style="max-height:340px;overflow-y:auto;">
+                    <table class="table table-sm table-striped mb-0">
+                        <tbody>${files.map(f => `
+                            <tr>
+                                <td style="font-size:0.78em;word-break:break-all;">${f.path}</td>
+                                <td style="white-space:nowrap;">${f.classification_name ?
+                                    `<span class="badge" style="background:${f.classification_color};font-size:0.7em;">${f.classification_name}</span>`
+                                    : ''}</td>
+                            </tr>`).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        } else if (nodeType === 'user') {
+            const resp = await fetch(`/infrastructure/nodes/user-access?username=${encodeURIComponent(label)}&domain=${domain}`);
+            const accesses = await resp.json();
+
+            if (!accesses || accesses.length === 0) {
+                content.innerHTML = '<p class="text-muted text-center mb-0">No access records found.</p>';
+                return;
+            }
+            content.innerHTML = `
+                <p class="mb-1"><strong>Access records: ${accesses.length}</strong></p>
+                <div style="max-height:340px;overflow-y:auto;">
+                    <table class="table table-sm table-striped mb-0">
+                        <thead><tr><th style="font-size:0.8em;">Target</th><th style="font-size:0.8em;">Type</th><th style="font-size:0.8em;">Access</th></tr></thead>
+                        <tbody>${accesses.map(a => {
+                            const bg = a.access_type === 'admin' ? '#dc3545' : a.access_type === 'write' ? '#fd7e14' : '#17a2b8';
+                            return `<tr>
+                                <td style="font-size:0.8em;">${a.target_name}</td>
+                                <td style="font-size:0.8em;">${a.target_type}</td>
+                                <td><span class="badge" style="background:${bg};font-size:0.7em;">${a.access_type}</span></td>
+                            </tr>`;
+                        }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        } else {
+            content.innerHTML = '';
+        }
+    } catch (e) {
+        content.innerHTML = '<p class="text-danger mb-0">Error loading details.</p>';
+    }
 }
 
 async function populateInfrastructure() {
     try {
-        const response = await fetch('/infrastructure/populate', {
-            method: 'POST'
-        });
-        
+        const response = await fetch('/infrastructure/populate', { method: 'POST' });
         if (response.ok) {
-            alert('Infrastructure data updated successfully!');
+            showToast('Infrastructure data updated successfully!');
             loadInfrastructureData();
         } else {
             const error = await response.json();
-            alert('Error updating data: ' + error.error);
+            showToast('Error updating data: ' + error.error, 'error');
         }
     } catch (error) {
         console.error('Error updating infrastructure:', error);
-        alert('Error updating infrastructure data.');
+        showToast('Error updating infrastructure data.', 'error');
     }
 }
 
@@ -1708,14 +1863,195 @@ function updateInfrastructureStats(hosts, users, shares, access) {
 }
 
 function setupInfrastructureFilters() {
-    const filters = [
-        'showHosts', 'showUsers', 'showShares',
-        'showRead', 'showWrite', 'showAdmin'
-    ];
+    const filters = ['showHosts', 'showUsers', 'showShares', 'showRead', 'showWrite', 'showAdmin'];
     filters.forEach(id => {
         const el = document.getElementById(id);
-        if (el) {
-            el.onchange = () => renderInfrastructureGraph();
-        }
+        if (el) el.onchange = () => renderInfrastructureGraph();
     });
+}
+
+// ——— Report page ———
+
+async function loadReportData() {
+    const domainParams = getDomainParams();
+    const content = document.getElementById('reportContent');
+    if (!content) return;
+
+    try {
+        const resp = await fetch(`/report/data${domainParams}`);
+        const data = await resp.json();
+
+        const classStats = data.classification_stats || [];
+        const criticalFiles = data.critical_files || [];
+        const topHosts = data.top_hosts || [];
+        const infra = data.infra_summary || {};
+        const total = classStats.reduce((s, c) => s + (c.count || 0), 0);
+
+        content.innerHTML = `
+            <div class="row mb-4">
+                <div class="col-md-6">
+                    <div class="card h-100">
+                        <div class="card-header"><h5 class="mb-0">Classification Summary</h5></div>
+                        <div class="card-body">
+                            <table class="table table-sm mb-0">
+                                <thead><tr><th>Classification</th><th>Files</th><th>%</th></tr></thead>
+                                <tbody>
+                                    ${classStats.map(c => `
+                                        <tr>
+                                            <td><span class="badge" style="background:${c.color}">${c.name}</span></td>
+                                            <td>${c.count}</td>
+                                            <td>${total ? ((c.count / total) * 100).toFixed(1) : 0}%</td>
+                                        </tr>`).join('')}
+                                    <tr class="fw-bold border-top"><td>Total</td><td>${total}</td><td>100%</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="card h-100">
+                        <div class="card-header"><h5 class="mb-0">Infrastructure Summary</h5></div>
+                        <div class="card-body">
+                            <table class="table table-sm mb-0">
+                                <tbody>
+                                    <tr><td><strong>Hosts</strong></td><td>${infra.hosts || 0}</td></tr>
+                                    <tr><td><strong>Users</strong></td><td>${infra.users || 0} <span class="text-muted">(${infra.admin_users || 0} admins)</span></td></tr>
+                                    <tr><td><strong>Shares</strong></td><td>${infra.shares || 0}</td></tr>
+                                    <tr><td><strong>Total Files</strong></td><td>${data.total_files || 0}</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            ${criticalFiles.length > 0 ? `
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Critical Findings</h5>
+                    <span class="badge bg-danger">${criticalFiles.length}</span>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive" style="max-height:400px;overflow-y:auto;">
+                        <table class="table table-sm table-striped mb-0">
+                            <thead class="sticky-top"><tr><th>Path</th><th>Host</th><th>Share</th><th>Size</th><th>Classification</th></tr></thead>
+                            <tbody>
+                                ${criticalFiles.map(f => `
+                                    <tr>
+                                        <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.85em;" title="${f.path}">${f.path}</td>
+                                        <td style="font-size:0.85em;">${f.host}</td>
+                                        <td style="font-size:0.85em;">${f.share}</td>
+                                        <td style="font-size:0.85em;">${formatSize(f.size)}</td>
+                                        <td><span class="badge" style="background:${f.color};font-size:0.8em;">${f.classification}</span></td>
+                                    </tr>`).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>` : ''}
+
+            ${topHosts.length > 0 ? `
+            <div class="card mb-4">
+                <div class="card-header"><h5 class="mb-0">Top Hosts by File Count</h5></div>
+                <div class="card-body p-0">
+                    <table class="table table-sm table-striped mb-0">
+                        <thead><tr><th>Host</th><th>Files</th></tr></thead>
+                        <tbody>${topHosts.map(h => `<tr><td>${h.host}</td><td>${h.count}</td></tr>`).join('')}</tbody>
+                    </table>
+                </div>
+            </div>` : ''}
+        `;
+
+        window._reportData = data;
+    } catch (e) {
+        if (content) content.innerHTML = '<p class="text-danger">Error loading report data.</p>';
+        showToast('Error loading report data.', 'error');
+    }
+}
+
+function downloadReport() {
+    const data = window._reportData;
+    if (!data) {
+        showToast('No report data. Navigate to the Report page first.', 'warning');
+        return;
+    }
+
+    const classStats = data.classification_stats || [];
+    const criticalFiles = data.critical_files || [];
+    const topHosts = data.top_hosts || [];
+    const infra = data.infra_summary || {};
+    const total = classStats.reduce((s, c) => s + (c.count || 0), 0);
+    const domain = selectedDomain || 'All Domains';
+    const date = new Date().toLocaleString();
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NullFang Report — ${date}</title>
+<style>
+body{font-family:Arial,sans-serif;margin:40px;color:#333;max-width:1100px;}
+h1{color:#2c3e50;border-bottom:3px solid #dc3545;padding-bottom:8px;}
+h2{color:#34495e;border-bottom:1px solid #eee;padding-bottom:6px;margin-top:30px;}
+table{border-collapse:collapse;width:100%;margin-bottom:20px;}
+th{background:#34495e;color:#fff;padding:8px 10px;text-align:left;}
+td{padding:6px 10px;border-bottom:1px solid #eee;}
+tr:nth-child(even){background:#f9f9f9;}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;color:#fff;font-size:.85em;}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:24px;}
+.card{border:1px solid #ddd;border-radius:8px;padding:16px;}
+.card h3{margin-top:0;color:#34495e;}
+footer{margin-top:40px;color:#aaa;font-size:.8em;}
+</style>
+</head>
+<body>
+<h1>NullFang Engagement Report</h1>
+<p><strong>Scope:</strong> ${domain} &nbsp;&nbsp; <strong>Generated:</strong> ${date}</p>
+<div class="grid">
+<div class="card">
+<h3>Classification Summary</h3>
+<table>
+<tr><th>Classification</th><th>Files</th><th>%</th></tr>
+${classStats.map(c => `<tr><td><span class="badge" style="background:${c.color}">${c.name}</span></td><td>${c.count}</td><td>${total ? ((c.count / total) * 100).toFixed(1) : 0}%</td></tr>`).join('')}
+<tr style="font-weight:bold"><td>Total</td><td>${total}</td><td>100%</td></tr>
+</table>
+</div>
+<div class="card">
+<h3>Infrastructure</h3>
+<table>
+<tr><th>Category</th><th>Count</th></tr>
+<tr><td>Hosts</td><td>${infra.hosts || 0}</td></tr>
+<tr><td>Users</td><td>${infra.users || 0}</td></tr>
+<tr><td>Admin Users</td><td>${infra.admin_users || 0}</td></tr>
+<tr><td>Shares</td><td>${infra.shares || 0}</td></tr>
+<tr><td>Total Files</td><td>${data.total_files || 0}</td></tr>
+</table>
+</div>
+</div>
+${criticalFiles.length > 0 ? `
+<h2>Critical Findings (${criticalFiles.length})</h2>
+<table>
+<tr><th>Path</th><th>Host</th><th>Share</th><th>Size</th><th>Classification</th></tr>
+${criticalFiles.map(f => `<tr><td>${f.path}</td><td>${f.host}</td><td>${f.share}</td><td>${formatSize(f.size)}</td><td><span class="badge" style="background:${f.color}">${f.classification}</span></td></tr>`).join('')}
+</table>` : ''}
+${topHosts.length > 0 ? `
+<h2>Top Hosts by File Count</h2>
+<table>
+<tr><th>Host</th><th>Files Found</th></tr>
+${topHosts.map(h => `<tr><td>${h.host}</td><td>${h.count}</td></tr>`).join('')}
+</table>` : ''}
+<footer>Generated by NullFang Web UI — For authorized security assessments only.</footer>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `nullfang_report_${new Date().toISOString().split('T')[0]}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Report downloaded.');
 }

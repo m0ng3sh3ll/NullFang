@@ -124,7 +124,7 @@ func InitDB(path string) (*sql.DB, error) {
 		name TEXT NOT NULL,
 		description TEXT,
 		match_pattern TEXT NOT NULL,
-		match_type TEXT NOT NULL CHECK(match_type IN ('exact', 'regex')),
+		match_type TEXT NOT NULL CHECK(match_type IN ('exact', 'regex', 'contains')),
 		classification_id INTEGER NOT NULL,
 		priority INTEGER NOT NULL DEFAULT 0,
 		enabled BOOLEAN NOT NULL DEFAULT 1,
@@ -249,32 +249,82 @@ func InitDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("error creating infrastructure indexes: %v", err)
 	}
 
-	// Inserir classificações padrão se não existirem
+	// Run schema migrations for existing databases first
+	if err = MigrateClassificationRulesAddContains(db); err != nil {
+		return nil, fmt.Errorf("migration MigrateClassificationRulesAddContains failed: %v", err)
+	}
+	if err = MigrateUpdateDefaultClassifications(db); err != nil {
+		return nil, fmt.Errorf("migration MigrateUpdateDefaultClassifications failed: %v", err)
+	}
+
+	// Insert default classifications (offensive-sec convention: level 1 = most critical)
 	_, err = db.Exec(`
 	INSERT OR IGNORE INTO classifications (name, description, level, color)
-	VALUES 
-		('Public', 'Public information, no restrictions', 1, '#28a745'),
-		('Internal', 'Internal information, for internal use', 2, '#17a2b8'),
-		('Confidential', 'Confidential information', 3, '#ffc107'),
-		('Restricted', 'Highly restricted information', 4, '#fd7e14'),
-		('Critical', 'Critical information for the organization', 5, '#dc3545')
+	VALUES
+		('Critical',      'Direct attack path: credentials, private keys, hashes, SAM/NTDS', 1, '#dc3545'),
+		('Sensitive',     'High-value intel: configs with credentials, password managers, DB dumps', 2, '#fd7e14'),
+		('Confidential',  'Internal data: financial records, contracts, PII', 3, '#ffc107'),
+		('Informational', 'General findings: office docs, emails, general configs', 4, '#17a2b8'),
+		('Public',        'Low value: publicly accessible content', 5, '#28a745')
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("error inserting default classifications: %v", err)
 	}
 
-	// Inserir algumas regras padrão
-	_, err = db.Exec(`
-	INSERT OR IGNORE INTO classification_rules (name, description, match_pattern, match_type, classification_id, priority, enabled)
-	VALUES 
-		('Passwords', 'Files containing passwords', 'password|senha|passwd|pass', 'regex', 3, 100, 1),
-		('Credentials', 'Files containing credentials', 'credential|credencial|login', 'regex', 3, 90, 1),
-		('Financial Documents', 'Sensitive financial documents', 'financeiro|financial|invoice|fatura', 'regex', 4, 80, 1),
-		('Legal Documents', 'Confidential legal documents', 'legal|contrato|contract|termo', 'regex', 3, 70, 1),
-		('Public Documents', 'Public documents', 'public|publico|noticia|news', 'regex', 1, 10, 1);
-	`)
+	// Remove old generic default rules if present
+	_, err = db.Exec(`DELETE FROM classification_rules WHERE name IN ('Passwords','Credentials','Financial Documents','Legal Documents','Public Documents')`)
 	if err != nil {
-		return nil, fmt.Errorf("erro ao inserir regras padrão: %v", err)
+		return nil, fmt.Errorf("error removing old default rules: %v", err)
+	}
+
+	// Insert 20 offensive-security classification rules (use level subqueries for portability)
+	defaultRules := []struct {
+		name, desc, pattern, matchType string
+		level, priority                int
+	}{
+		// Critical (level=1): direct attack paths
+		{"Credential Files", "KeePass databases, password vaults, private key files", `\.kdbx$|\.kdb$|\.pfx$|\.p12$|id_rsa$|id_dsa$|id_ed25519$|\.pem$`, "regex", 1, 100},
+		{"NTLM Hashes", "NTLM hash strings in matched content", `[a-fA-F0-9]{32}:[a-fA-F0-9]{32}`, "regex", 1, 99},
+		{"SAM/NTDS Backup", "Windows credential database backups", `sam\.bak$|ntds\.dit$|\.ntds$|system\.hive$|security\.hive$`, "regex", 1, 98},
+		{"Plaintext Passwords", "Files found by password keyword searches", `^password$|^passwd$|^pass$|^pwd$|^credentials$`, "regex", 1, 97},
+		{"Secret Keys and API Tokens", "Environment files or configs containing secrets", `secret_key|api_key|client_secret|access_token|aws_secret_access`, "contains", 1, 96},
+		// Sensitive (level=2): high-value intelligence
+		{"Web Application Config", "Web.config, application.yml with potential credentials", `web\.config$|application\.yml$|application\.properties$|database\.yml$|settings\.py$`, "regex", 2, 89},
+		{"Environment Files", "Dotenv files often containing service credentials", `\.env$|\.env\.local$|\.env\.production$|\.env\.staging$`, "regex", 2, 88},
+		{"SSH Keys and Config", "SSH private keys and configuration", `authorized_keys|ssh_config|id_rsa|id_dsa|id_ed25519|id_ecdsa`, "contains", 2, 87},
+		{"Database Dumps", "SQL dumps and database export files", `\.sql$|\.dump$|\.mysqldump$|\.pgdump$`, "regex", 2, 86},
+		{"Shadow and Password Files", "Unix password and shadow files", `shadow$|passwd$|shadow\.bak$|passwd\.bak$|gshadow$`, "contains", 2, 85},
+		{"Backup Archives", "Compressed backups that may contain sensitive data", `backup.*\.zip$|backup.*\.tar\.gz$|backup.*\.7z$|backup.*\.rar$`, "regex", 2, 84},
+		// Confidential (level=3): internal sensitive data
+		{"Financial Documents", "Invoices, payroll, financial reports", `invoice|payroll|salary|financial.report|billing|bank.statement`, "regex", 3, 79},
+		{"Personally Identifiable Information", "Files related to personal data or PII", `ssn|social.security|passport|birth.cert|patient.record|employee.record`, "regex", 3, 78},
+		{"Legal and Contracts", "NDAs, contracts, legal agreements", `contract|agreement|nda|non.disclosure|settlement|legal`, "regex", 3, 77},
+		{"Network Architecture", "Network diagrams, firewall rules, routing configs", `network.diagram|topology|firewall.rule|\.acl$|vlan.config`, "regex", 3, 76},
+		// Informational (level=4): general findings
+		{"Office Documents", "Microsoft Office and OpenDocument files", `\.docx$|\.xlsx$|\.pptx$|\.doc$|\.xls$|\.ppt$|\.odt$|\.ods$`, "regex", 4, 69},
+		{"Email Files", "Email archives and mailbox files", `\.eml$|\.pst$|\.ost$|\.msg$|\.mbox$|\.emlx$`, "regex", 4, 68},
+		{"Log Files", "Application and system log files", `\.log$|access\.log$|error\.log$|audit\.log$|debug\.log$`, "regex", 4, 67},
+		{"Script Files", "PowerShell, batch, shell, and Python scripts", `\.ps1$|\.bat$|\.cmd$|\.sh$|\.py$|\.rb$|\.pl$`, "regex", 4, 66},
+		{"Generic Config Files", "INI, YAML, JSON, XML configuration files", `\.conf$|\.cfg$|\.ini$|\.yaml$|\.yml$|\.json$|\.xml$|\.toml$`, "regex", 4, 65},
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("error starting transaction for default rules: %v", err)
+	}
+	for _, r := range defaultRules {
+		_, err = tx.Exec(`
+			INSERT OR IGNORE INTO classification_rules (name, description, match_pattern, match_type, classification_id, priority, enabled)
+			SELECT ?, ?, ?, ?, (SELECT id FROM classifications WHERE level=? LIMIT 1), ?, 1
+			WHERE EXISTS (SELECT 1 FROM classifications WHERE level=?)
+		`, r.name, r.desc, r.pattern, r.matchType, r.level, r.priority, r.level)
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error inserting default rule %q: %v", r.name, err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, fmt.Errorf("error committing default rules: %v", err)
 	}
 
 	// Run migration for existing databases
@@ -880,6 +930,119 @@ func GetInfrastructureAccess(db *sql.DB) ([]map[string]interface{}, error) {
 		})
 	}
 	return accesses, nil
+}
+
+// GetReportData returns a comprehensive data snapshot for the Report page.
+func GetReportData(db *sql.DB, domain string) (map[string]interface{}, error) {
+	result := make(map[string]interface{})
+
+	// Classification statistics
+	classQuery := `
+		SELECT c.name, c.color, c.level, COUNT(dc.id) as cnt
+		FROM classifications c
+		LEFT JOIN document_classifications dc ON c.id = dc.classification_id
+		LEFT JOIN files f ON dc.file_id = f.id`
+	classArgs := []interface{}{}
+	if domain != "" {
+		classQuery += " WHERE f.domain = ?"
+		classArgs = append(classArgs, domain)
+	}
+	classQuery += " GROUP BY c.id ORDER BY c.level ASC"
+
+	rows, err := db.Query(classQuery, classArgs...)
+	if err != nil {
+		return nil, err
+	}
+	var classStats []map[string]interface{}
+	total := 0
+	for rows.Next() {
+		var name, color string
+		var level, cnt int
+		if err := rows.Scan(&name, &color, &level, &cnt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		total += cnt
+		classStats = append(classStats, map[string]interface{}{
+			"name": name, "color": color, "level": level, "count": cnt,
+		})
+	}
+	rows.Close()
+	result["classification_stats"] = classStats
+	result["total_files"] = total
+
+	// Critical files (level=1)
+	critQuery := `
+		SELECT f.path, f.host, f.share, f.domain, f.size, f.mod_time, c.name, c.color
+		FROM files f
+		JOIN document_classifications dc ON f.id = dc.file_id
+		JOIN classifications c ON dc.classification_id = c.id
+		WHERE c.level = 1`
+	critArgs := []interface{}{}
+	if domain != "" {
+		critQuery += " AND f.domain = ?"
+		critArgs = append(critArgs, domain)
+	}
+	critQuery += " ORDER BY f.found_time DESC LIMIT 50"
+
+	rows, err = db.Query(critQuery, critArgs...)
+	if err != nil {
+		return nil, err
+	}
+	var critFiles []map[string]interface{}
+	for rows.Next() {
+		var path, host, share, modTime, className, classColor string
+		var domainStr sql.NullString
+		var size int64
+		if err := rows.Scan(&path, &host, &share, &domainStr, &size, &modTime, &className, &classColor); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		critFiles = append(critFiles, map[string]interface{}{
+			"path": path, "host": host, "share": share, "domain": domainStr.String,
+			"size": size, "mod_time": modTime, "classification": className, "color": classColor,
+		})
+	}
+	rows.Close()
+	result["critical_files"] = critFiles
+
+	// Top hosts by file count
+	hostQuery := `SELECT host, COUNT(*) as cnt FROM files`
+	hostArgs := []interface{}{}
+	if domain != "" {
+		hostQuery += " WHERE domain = ?"
+		hostArgs = append(hostArgs, domain)
+	}
+	hostQuery += " GROUP BY host ORDER BY cnt DESC LIMIT 20"
+
+	rows, err = db.Query(hostQuery, hostArgs...)
+	if err != nil {
+		return nil, err
+	}
+	var topHosts []map[string]interface{}
+	for rows.Next() {
+		var host string
+		var cnt int
+		if err := rows.Scan(&host, &cnt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		topHosts = append(topHosts, map[string]interface{}{"host": host, "count": cnt})
+	}
+	rows.Close()
+	result["top_hosts"] = topHosts
+
+	// Infrastructure summary
+	var hostCount, userCount, shareCount, adminCount int
+	db.QueryRow("SELECT COUNT(*) FROM infrastructure_hosts").Scan(&hostCount)
+	db.QueryRow("SELECT COUNT(*) FROM infrastructure_users").Scan(&userCount)
+	db.QueryRow("SELECT COUNT(*) FROM infrastructure_shares").Scan(&shareCount)
+	db.QueryRow("SELECT COUNT(*) FROM infrastructure_users WHERE is_admin = 1").Scan(&adminCount)
+	result["infra_summary"] = map[string]interface{}{
+		"hosts": hostCount, "users": userCount, "shares": shareCount, "admin_users": adminCount,
+	}
+
+	return result, nil
 }
 
 // LoadKnownFiles returns a map of "share\path" → mod_time for all files previously
