@@ -108,6 +108,7 @@ func NewServer(dbPath string) (*Server, error) {
 		// Análise
 		api.GET("/analysis/stats", server.getClassificationStats)
 		api.GET("/analysis/sensitivity-map", server.getSensitivityMap)
+		api.GET("/analysis/summary", server.getAnalysisSummary)
 
 		// Rota para sugestões de classificação
 		api.GET("/documents/classification-suggestions", server.classificationSuggestions)
@@ -624,6 +625,71 @@ func (s *Server) getSensitivityMap(c *gin.Context) {
 	c.JSON(http.StatusOK, mapData)
 }
 
+func (s *Server) getAnalysisSummary(c *gin.Context) {
+	domain := c.Query("domain")
+
+	domainArg := func(withDomain bool) []interface{} {
+		if withDomain && domain != "" {
+			return []interface{}{domain}
+		}
+		return nil
+	}
+	domainClause := func(col string) string {
+		if domain != "" {
+			return " AND (" + col + " = ?)"
+		}
+		return ""
+	}
+
+	result := map[string]interface{}{}
+
+	var totalFiles int
+	s.db.QueryRow("SELECT COUNT(*) FROM files f WHERE 1=1"+domainClause("f.domain"), domainArg(true)...).Scan(&totalFiles)
+	result["total_files"] = totalFiles
+
+	var classified int
+	s.db.QueryRow("SELECT COUNT(DISTINCT dc.file_id) FROM document_classifications dc JOIN files f ON dc.file_id = f.id WHERE 1=1"+domainClause("f.domain"), domainArg(true)...).Scan(&classified)
+	result["classified_files"] = classified
+
+	var critical int
+	s.db.QueryRow("SELECT COUNT(DISTINCT dc.file_id) FROM document_classifications dc JOIN classifications c ON dc.classification_id = c.id JOIN files f ON dc.file_id = f.id WHERE c.level = 1"+domainClause("f.domain"), domainArg(true)...).Scan(&critical)
+	result["critical_files"] = critical
+
+	var totalHosts int
+	s.db.QueryRow("SELECT COUNT(DISTINCT f.host) FROM files f WHERE 1=1"+domainClause("f.domain"), domainArg(true)...).Scan(&totalHosts)
+	result["total_hosts"] = totalHosts
+
+	hostRows, err := s.db.Query("SELECT f.host, COUNT(*) as cnt FROM files f WHERE 1=1"+domainClause("f.domain")+" GROUP BY f.host ORDER BY cnt DESC LIMIT 10", domainArg(true)...)
+	if err == nil {
+		defer hostRows.Close()
+		var topHosts []map[string]interface{}
+		for hostRows.Next() {
+			var host string
+			var cnt int
+			if hostRows.Scan(&host, &cnt) == nil {
+				topHosts = append(topHosts, map[string]interface{}{"host": host, "count": cnt})
+			}
+		}
+		result["top_hosts"] = topHosts
+	}
+
+	patRows, err := s.db.Query("SELECT f.match_pattern, COUNT(*) as cnt FROM files f WHERE f.match_pattern != ''"+domainClause("f.domain")+" GROUP BY f.match_pattern ORDER BY cnt DESC LIMIT 10", domainArg(true)...)
+	if err == nil {
+		defer patRows.Close()
+		var topPatterns []map[string]interface{}
+		for patRows.Next() {
+			var pattern string
+			var cnt int
+			if patRows.Scan(&pattern, &cnt) == nil {
+				topPatterns = append(topPatterns, map[string]interface{}{"pattern": pattern, "count": cnt})
+			}
+		}
+		result["top_patterns"] = topPatterns
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
 // Handlers para regras de classificação
 func (s *Server) listRules(c *gin.Context) {
 	rows, err := s.db.Query(`
@@ -1096,101 +1162,57 @@ func (s *Server) classificationSuggestions(c *gin.Context) {
 	c.JSON(http.StatusOK, suggestions)
 }
 
+func filterByDomain(items []map[string]interface{}, domain, domainKey string) []map[string]interface{} {
+	if domain == "" {
+		if items == nil {
+			return []map[string]interface{}{}
+		}
+		return items
+	}
+	out := []map[string]interface{}{}
+	for _, item := range items {
+		if v, ok := item[domainKey].(string); ok && v == domain {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 // Handlers para infraestrutura
 func (s *Server) listInfrastructureHosts(c *gin.Context) {
-	// Obter parâmetro de domínio da query string
-	domain := c.Query("domain")
-
 	hosts, err := database.GetInfrastructureHosts(s.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Filtrar por domínio se especificado
-	if domain != "" {
-		var filteredHosts []map[string]interface{}
-		for _, host := range hosts {
-			if hostDomain, ok := host["domain"].(string); ok && hostDomain == domain {
-				filteredHosts = append(filteredHosts, host)
-			}
-		}
-		c.JSON(http.StatusOK, filteredHosts)
-	} else {
-		c.JSON(http.StatusOK, hosts)
-	}
+	c.JSON(http.StatusOK, filterByDomain(hosts, c.Query("domain"), "domain"))
 }
 
 func (s *Server) listInfrastructureUsers(c *gin.Context) {
-	// Obter parâmetro de domínio da query string
-	domain := c.Query("domain")
-
 	users, err := database.GetInfrastructureUsers(s.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Filtrar por domínio se especificado
-	if domain != "" {
-		var filteredUsers []map[string]interface{}
-		for _, user := range users {
-			if userDomain, ok := user["domain"].(string); ok && userDomain == domain {
-				filteredUsers = append(filteredUsers, user)
-			}
-		}
-		c.JSON(http.StatusOK, filteredUsers)
-	} else {
-		c.JSON(http.StatusOK, users)
-	}
+	c.JSON(http.StatusOK, filterByDomain(users, c.Query("domain"), "domain"))
 }
 
 func (s *Server) listInfrastructureShares(c *gin.Context) {
-	// Obter parâmetro de domínio da query string
-	domain := c.Query("domain")
-
 	shares, err := database.GetInfrastructureShares(s.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Filtrar por domínio se especificado
-	if domain != "" {
-		var filteredShares []map[string]interface{}
-		for _, share := range shares {
-			if shareDomain, ok := share["domain"].(string); ok && shareDomain == domain {
-				filteredShares = append(filteredShares, share)
-			}
-		}
-		c.JSON(http.StatusOK, filteredShares)
-	} else {
-		c.JSON(http.StatusOK, shares)
-	}
+	c.JSON(http.StatusOK, filterByDomain(shares, c.Query("domain"), "domain"))
 }
 
 func (s *Server) listInfrastructureAccess(c *gin.Context) {
-	// Obter parâmetro de domínio da query string
-	domain := c.Query("domain")
-
 	access, err := database.GetInfrastructureAccess(s.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Filtrar por domínio se especificado
-	if domain != "" {
-		var filteredAccess []map[string]interface{}
-		for _, acc := range access {
-			if accDomain, ok := acc["domain"].(string); ok && accDomain == domain {
-				filteredAccess = append(filteredAccess, acc)
-			}
-		}
-		c.JSON(http.StatusOK, filteredAccess)
-	} else {
-		c.JSON(http.StatusOK, access)
-	}
+	c.JSON(http.StatusOK, filterByDomain(access, c.Query("domain"), "domain"))
 }
 
 func (s *Server) populateInfrastructure(c *gin.Context) {

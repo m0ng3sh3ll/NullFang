@@ -89,15 +89,24 @@ function getDomainParams() {
     return params;
 }
 
+function getDomainBadge() {
+    if (!selectedDomain) return '';
+    return `<span class="badge ms-2" style="background:#34495e;font-size:0.75rem;font-weight:400;vertical-align:middle;">
+        ${selectedDomain} <span onclick="updateSelectedDomain('');document.getElementById('domainSelector').value='';loadContent(window.location.pathname);" style="cursor:pointer;opacity:0.7;margin-left:4px;">✕</span>
+    </span>`;
+}
+
 // Rotas da aplicação
 const routes = {
-    '/': 'home',
-    '/documents': 'documents',
+    '/': 'triage',
+    '/triage': 'triage',
+    '/classify': 'classify',
+    '/documents': 'triage',
     '/analysis': 'analysis',
-    '/settings': 'settings',
-    '/suggestions': 'suggestions',
+    '/settings': 'classify',
+    '/suggestions': 'triage',
     '/infrastructure': 'infrastructure',
-    '/report': 'report'
+    '/report': 'analysis'
 };
 
 // Função para navegação
@@ -113,111 +122,92 @@ function loadContent(route) {
 
     switch (route) {
         case '/':
-            mainContent.innerHTML = `
-                <div class="container mt-4">
-                    <h2>Welcome to the Classification System</h2>
-                    <div class="row mt-4">
-                        <div class="col-md-6">
-                            <div class="card">
-                                <div class="card-body">
-                                    <h5 class="card-title">Documents</h5>
-                                    <p class="card-text">Manage and classify your documents.</p>
-                                    <a href="#" onclick="navigate('/documents')" class="btn btn-primary">View Documents</a>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="card">
-                                <div class="card-body">
-                                    <h5 class="card-title">Analysis</h5>
-                                    <p class="card-text">Visualize statistics and sensitivity map.</p>
-                                    <a href="#" onclick="navigate('/analysis')" class="btn btn-primary">View Analysis</a>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-            break;
-
         case '/documents':
-            mainContent.innerHTML = `
-                <div class="container mt-4">
-                    <h2>Documents</h2>
-                    <div class="mb-3 d-flex gap-2 align-items-center flex-wrap">
-                        <button class="btn btn-primary" onclick="classifySelected()">Classify Selected</button>
-                        <button class="btn btn-secondary" onclick="autoClassifyDocuments()">Classify Automatically</button>
-                        <div id="documentsPagination" class="ms-auto d-flex align-items-center gap-2"></div>
-                    </div>
-                    <div class="table-responsive">
-                        <table class="table table-striped" id="documentsTable">
-                            <thead>
-                                <tr>
-                                    <th><input type="checkbox" id="selectAll"></th>
-                                    <th>Name</th>
-                                    <th>Host</th>
-                                    <th>Share</th>
-                                    <th>Domain</th>
-                                    <th>Size</th>
-                                    <th>Last Modified</th>
-                                    <th>Search Parameter</th>
-                                    <th>Searched Value</th>
-                                    <th>Found Pattern</th>
-                                    <th>Match Type</th>
-                                    <th>Classification</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody><tr><td colspan="13" class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div> Loading...</td></tr></tbody>
-                        </table>
-                    </div>
-                </div>
-            `;
-            loadDocuments();
-            break;
-
-        case '/analysis':
-            mainContent.innerHTML = `
-                <div class="container mt-4">
-                    <h2>Analysis of Documents</h2>
-                    <p class="text-muted">Visual summary of classifications and patterns found. Ready for evidence in report.</p>
-                    <div class="row mb-4">
-                        <div class="col-md-6">
-                            <canvas id="classPieChart"></canvas>
-                        </div>
-                        <div class="col-md-6">
-                            <table class="table table-bordered" id="classSummaryTable">
-                                <thead class="table-light">
-                                    <tr>
-                                        <th>Classification</th>
-                                        <th>Quantity</th>
-                                        <th>Percentage</th>
-                                    </tr>
-                                </thead>
-                                <tbody></tbody>
-                            </table>
-                        </div>
-                    </div>
-                    <div class="row mb-4">
-                        <div class="col-md-12">
-                            <h5>Sensitive Patterns Found</h5>
-                            <canvas id="patternBarChart"></canvas>
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-md-12 text-end text-muted">
-                            <small>Analysis generated on: <span id="analysisDate"></span></small>
-                        </div>
-                    </div>
-                </div>
-            `;
-            loadAnalysisCharts();
-            break;
+        case '/suggestions':
+            navigate('/triage');
+            return;
 
         case '/settings':
+            navigate('/classify');
+            return;
+
+        case '/report':
+            navigate('/analysis');
+            return;
+
+        case '/triage':
+            mainContent.innerHTML = `
+                <div class="container-fluid mt-4" style="max-width:1400px;">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h2 class="mb-0">Triage <small id="triageDomainBadge"></small></h2>
+                        <div class="d-flex gap-2">
+                            <button class="btn btn-success btn-sm" onclick="applyAllSuggestionsInline()">
+                                <i class="bi bi-check-all me-1"></i>Apply All Suggestions
+                            </button>
+                            <button class="btn btn-primary btn-sm" onclick="bulkClassifySelected()">
+                                Classify Selected
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="card mb-3">
+                        <div class="card-body py-2">
+                            <div class="row g-2 align-items-center">
+                                <div class="col-md-4">
+                                    <input type="text" id="triageSearch" class="form-control form-control-sm" placeholder="Search by name or path…" oninput="filterTriage()">
+                                </div>
+                                <div class="col-md-3">
+                                    <input type="text" id="triageHostFilter" class="form-control form-control-sm" placeholder="Filter by host…" oninput="filterTriage()">
+                                </div>
+                                <div class="col-md-3">
+                                    <select id="triageClassFilter" class="form-select form-select-sm" onchange="filterTriage()">
+                                        <option value="">All classifications</option>
+                                        <option value="__unclassified__">Unclassified only</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-2 text-end">
+                                    <button class="btn btn-outline-secondary btn-sm" onclick="clearTriageFilters()">Clear</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-body p-0">
+                            <div class="table-responsive">
+                                <table class="table table-sm table-hover mb-0" id="triageTable">
+                                    <thead>
+                                        <tr>
+                                            <th style="width:32px;"><input type="checkbox" id="triageSelectAll" onchange="toggleTriageSelectAll(this)"></th>
+                                            <th>File</th>
+                                            <th>Host</th>
+                                            <th>Share</th>
+                                            <th>Pattern</th>
+                                            <th>Suggestion</th>
+                                            <th>Classification</th>
+                                            <th style="width:110px;">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="triageTableBody">
+                                        <tr><td colspan="8" class="text-center py-4"><div class="spinner-border spinner-border-sm me-2"></div>Loading…</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="d-flex justify-content-between align-items-center mt-3" id="triagePagination"></div>
+                </div>
+            `;
+            document.getElementById('triageDomainBadge').innerHTML = getDomainBadge();
+            populateTriageClassFilter();
+            loadTriage();
+            break;
+
+        case '/classify':
             mainContent.innerHTML = `
                 <div class="container mt-4">
-                    <h2>Settings</h2>
+                    <h2>Classify</h2>
                     <div class="row">
                         <div class="col-md-6">
                             <div class="card">
@@ -247,7 +237,7 @@ function loadContent(route) {
                                     <h5 class="card-title">Classification Rules</h5>
                                     <button class="btn btn-primary mb-3" onclick="showNewRuleModal()">New Rule</button>
                                     <div class="table-responsive">
-                                        <table class="table">                                        
+                                        <table class="table">
                                             <tbody id="rulesList"></tbody>
                                         </table>
                                     </div>
@@ -262,30 +252,109 @@ function loadContent(route) {
             loadRules();
             break;
 
-        case '/suggestions':
+        case '/analysis':
             mainContent.innerHTML = `
-                <div class="container mt-4">
-                    <h2>Classification Suggestions</h2>
-                    <div class="mb-3">
-                        <button class="btn btn-success" id="applyAllSuggestions">Apply All Suggestions</button>
+                <div class="container-fluid mt-4" style="max-width:1200px;">
+                    <div class="d-flex justify-content-between align-items-center mb-4">
+                        <div>
+                            <h2 class="mb-0">Findings Analysis</h2>
+                            <small class="text-muted" id="analysisDate"></small>
+                        </div>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="copyAnalysisSummary()">
+                            <i class="bi bi-clipboard me-1"></i>Copy Summary
+                        </button>
                     </div>
-                    <div class="table-responsive">
-                        <table class="table table-striped" id="suggestionsTable">
-                            <thead>
-                                <tr>
-                                    <th>Name</th>
-                                    <th>Current Classification</th>
-                                    <th>Reason for Suggestion</th>
-                                    <th style="text-align:right;">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
+
+                    <!-- Stat cards -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-6 col-md-3">
+                            <div class="card text-center">
+                                <div class="card-body py-3">
+                                    <div class="display-6 fw-bold text-dark" id="statTotalFiles">—</div>
+                                    <div class="text-muted" style="font-size:0.78rem;text-transform:uppercase;letter-spacing:.06em;">Files Found</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="card text-center">
+                                <div class="card-body py-3">
+                                    <div class="display-6 fw-bold text-dark" id="statClassified">—</div>
+                                    <div class="text-muted" style="font-size:0.78rem;text-transform:uppercase;letter-spacing:.06em;">Classified</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="card text-center">
+                                <div class="card-body py-3">
+                                    <div class="display-6 fw-bold" id="statCritical" style="color:#dc3545;">—</div>
+                                    <div class="text-muted" style="font-size:0.78rem;text-transform:uppercase;letter-spacing:.06em;">Critical</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="card text-center">
+                                <div class="card-body py-3">
+                                    <div class="display-6 fw-bold" id="statHosts" style="color:#17a2b8;">—</div>
+                                    <div class="text-muted" style="font-size:0.78rem;text-transform:uppercase;letter-spacing:.06em;">Hosts</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Pie + breakdown table -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-5">
+                            <div class="card h-100">
+                                <div class="card-header"><h6 class="mb-0">Distribution by Classification</h6></div>
+                                <div class="card-body d-flex align-items-center justify-content-center">
+                                    <canvas id="classPieChart" style="max-height:240px;"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-7">
+                            <div class="card h-100">
+                                <div class="card-header"><h6 class="mb-0">Breakdown</h6></div>
+                                <div class="card-body">
+                                    <table class="table table-sm mb-2" id="classSummaryTable">
+                                        <thead>
+                                            <tr>
+                                                <th>Classification</th>
+                                                <th class="text-end">Files</th>
+                                                <th class="text-end">%</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody></tbody>
+                                    </table>
+                                    <div id="classificationTotals" class="text-muted" style="font-size:0.82rem;border-top:1px solid #dee2e6;padding-top:8px;"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Bottom charts -->
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header"><h6 class="mb-0">Top Patterns Found</h6></div>
+                                <div class="card-body">
+                                    <canvas id="patternBarChart" style="max-height:220px;"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header"><h6 class="mb-0">Top Hosts by Files Found</h6></div>
+                                <div class="card-body">
+                                    <canvas id="hostBarChart" style="max-height:220px;"></canvas>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             `;
-            loadSuggestions();
+            loadAnalysisCharts();
             break;
+
 
         case '/infrastructure':
             mainContent.innerHTML = `
@@ -369,25 +438,9 @@ function loadContent(route) {
             loadInfrastructureData();
             break;
 
-        case '/report':
-            mainContent.innerHTML = `
-                <div class="container mt-4">
-                    <div class="d-flex justify-content-between align-items-center mb-4">
-                        <h2>Report</h2>
-                        <button class="btn btn-success" onclick="downloadReport()">
-                            <i class="bi bi-download"></i> Download HTML
-                        </button>
-                    </div>
-                    <div id="reportContent">
-                        <div class="text-center py-5"><div class="spinner-border" role="status"></div><p class="mt-2 text-muted">Generating report...</p></div>
-                    </div>
-                </div>
-            `;
-            loadReportData();
-            break;
-
         default:
-            mainContent.innerHTML = '<div class="container mt-4"><h2>Page not found</h2></div>';
+            navigate('/triage');
+            return;
     }
 }
 
@@ -522,88 +575,407 @@ function changePage(page) {
     document.querySelector('#documentsTable')?.scrollIntoView({ behavior: 'smooth' });
 }
 
+// ——— Triage state ———
+let triageAllDocuments = [];
+let triageSuggestionsMap = {};
+let triageFiltered = [];
+let triagePage = 0;
+const TRIAGE_PAGE_SIZE = 50;
+let _triageBulkIds = [];
+
+async function populateTriageClassFilter() {
+    try {
+        const res = await fetch('/classifications');
+        const classes = await res.json();
+        const sel = document.getElementById('triageClassFilter');
+        if (!sel) return;
+        classes.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c.id;
+            opt.textContent = c.name;
+            sel.appendChild(opt);
+        });
+    } catch(e) {}
+}
+
+async function loadTriage() {
+    const domainParams = getDomainParams();
+    const tbody = document.getElementById('triageTableBody');
+    if (tbody) tbody.innerHTML = '<tr><td colspan="8" class="text-center py-4"><div class="spinner-border spinner-border-sm me-2"></div>Loading…</td></tr>';
+    try {
+        const [docs, suggestions] = await Promise.all([
+            fetch(`/documents${domainParams}`).then(r => r.json()),
+            fetch(`/documents/classification-suggestions${domainParams}`).then(r => r.json()).catch(() => [])
+        ]);
+
+        triageAllDocuments = docs || [];
+        triageSuggestionsMap = {};
+        (suggestions || []).forEach(s => {
+            const fid = s.id || s.file_id;
+            if (fid && !triageSuggestionsMap[fid]) {
+                triageSuggestionsMap[fid] = s;
+            }
+        });
+
+        filterTriage();
+    } catch(err) {
+        console.error('Triage load error:', err);
+        showToast('Error loading triage data.', 'error');
+    }
+}
+
+function filterTriage() {
+    const search = (document.getElementById('triageSearch')?.value || '').toLowerCase();
+    const hostFilter = (document.getElementById('triageHostFilter')?.value || '').toLowerCase();
+    const classFilter = document.getElementById('triageClassFilter')?.value || '';
+
+    triageFiltered = triageAllDocuments.filter(doc => {
+        if (search && !(doc.name || '').toLowerCase().includes(search) && !(doc.path || '').toLowerCase().includes(search)) return false;
+        if (hostFilter && !(doc.host || '').toLowerCase().includes(hostFilter)) return false;
+        if (classFilter === '__unclassified__' && doc.classification) return false;
+        if (classFilter && classFilter !== '__unclassified__' && doc.classification?.id != classFilter) return false;
+        return true;
+    });
+
+    triagePage = 0;
+    renderTriagePage();
+}
+
+function clearTriageFilters() {
+    const s = document.getElementById('triageSearch'); if (s) s.value = '';
+    const h = document.getElementById('triageHostFilter'); if (h) h.value = '';
+    const c = document.getElementById('triageClassFilter'); if (c) c.value = '';
+    filterTriage();
+}
+
+function renderTriagePage() {
+    const tbody = document.getElementById('triageTableBody');
+    if (!tbody) return;
+
+    const start = triagePage * TRIAGE_PAGE_SIZE;
+    const pageItems = triageFiltered.slice(start, start + TRIAGE_PAGE_SIZE);
+
+    if (pageItems.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-4">${
+            triageAllDocuments.length === 0
+                ? 'No files found. Run a scan first.'
+                : 'No files match the current filters.'
+        }</td></tr>`;
+    } else {
+        tbody.innerHTML = pageItems.map(doc => {
+            const sugg = triageSuggestionsMap[doc.id];
+            let suggColor = '#6c757d';
+            let suggName = '?';
+            let suggClassId = '';
+            if (sugg) {
+                const sc = sugg.suggested_classification;
+                if (sc) {
+                    suggColor = sc.color || '#6c757d';
+                    suggName = sc.name || '?';
+                    suggClassId = sc.id || '';
+                }
+            }
+            const suggBadge = sugg && suggClassId
+                ? `<span class="badge" style="background:${suggColor};cursor:pointer;" onclick="applySuggestionDirect(${doc.id},${suggClassId})" title="Click to apply: ${sugg.rule_name || ''}">${suggName} ↵</span>`
+                : `<span class="text-muted small">—</span>`;
+            const classBadge = doc.classification
+                ? `<span class="badge" style="background:${doc.classification.color}">${doc.classification.name}</span>`
+                : `<span class="text-muted small">—</span>`;
+            const fileName = (doc.name || doc.path || '').split(/[/\\]/).pop();
+            return `<tr>
+                <td><input type="checkbox" class="triage-cb" data-id="${doc.id}"></td>
+                <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${doc.path || doc.name || ''}">${fileName}</td>
+                <td>${doc.host || ''}</td>
+                <td>${doc.share || ''}</td>
+                <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${doc.match_pattern || ''}">${doc.match_pattern || ''}</td>
+                <td>${suggBadge}</td>
+                <td>${classBadge}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-primary" style="font-size:0.75rem;padding:2px 8px;" onclick="showClassifyModal(${doc.id})">Classify</button>
+                </td>
+            </tr>`;
+        }).join('');
+    }
+
+    const totalPages = Math.ceil(triageFiltered.length / TRIAGE_PAGE_SIZE);
+    const pag = document.getElementById('triagePagination');
+    if (pag) {
+        pag.innerHTML = `
+            <small class="text-muted">${triageFiltered.length} files — page ${triagePage + 1} of ${Math.max(1, totalPages)}</small>
+            <div class="btn-group btn-group-sm">
+                <button class="btn btn-outline-secondary" onclick="changeTriagePage(${triagePage - 1})" ${triagePage === 0 ? 'disabled' : ''}>← Prev</button>
+                <button class="btn btn-outline-secondary" onclick="changeTriagePage(${triagePage + 1})" ${triagePage >= totalPages - 1 ? 'disabled' : ''}>Next →</button>
+            </div>
+        `;
+    }
+    const allCb = document.getElementById('triageSelectAll');
+    if (allCb) allCb.checked = false;
+}
+
+function changeTriagePage(page) {
+    const totalPages = Math.ceil(triageFiltered.length / TRIAGE_PAGE_SIZE);
+    if (page < 0 || page >= totalPages) return;
+    triagePage = page;
+    renderTriagePage();
+}
+
+function toggleTriageSelectAll(cb) {
+    document.querySelectorAll('.triage-cb').forEach(el => el.checked = cb.checked);
+}
+
+async function applySuggestionDirect(fileId, classificationId) {
+    try {
+        const res = await fetch('/documents/classify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_id: fileId, classification_id: parseInt(classificationId), notes: 'Auto-suggestion' })
+        });
+        if (!res.ok) throw new Error('Classification failed');
+        const doc = triageAllDocuments.find(d => d.id === fileId);
+        if (doc && triageSuggestionsMap[fileId]) {
+            const sc = triageSuggestionsMap[fileId].suggested_classification;
+            doc.classification = sc ? { id: sc.id, name: sc.name, color: sc.color } : null;
+            delete triageSuggestionsMap[fileId];
+        }
+        filterTriage();
+        showToast('Classification applied.', 'success');
+    } catch(e) {
+        showToast('Error applying classification.', 'error');
+    }
+}
+
+async function applyAllSuggestionsInline() {
+    const entries = Object.entries(triageSuggestionsMap);
+    const toApply = entries.filter(([fid, s]) => {
+        const sc = s.suggested_classification;
+        const doc = triageAllDocuments.find(d => d.id == fid);
+        return sc && (!doc?.classification || doc.classification.id !== sc.id);
+    });
+    if (toApply.length === 0) { showToast('No pending suggestions.', 'info'); return; }
+    if (!confirm(`Apply ${toApply.length} suggestions?`)) return;
+    let applied = 0;
+    for (const [fid, s] of toApply) {
+        try {
+            const sc = s.suggested_classification;
+            await fetch('/documents/classify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ document_id: parseInt(fid), classification_id: sc.id, notes: 'Auto-suggestion' })
+            });
+            const doc = triageAllDocuments.find(d => d.id == fid);
+            if (doc) doc.classification = { id: sc.id, name: sc.name, color: sc.color };
+            delete triageSuggestionsMap[fid];
+            applied++;
+        } catch(e) {}
+    }
+    filterTriage();
+    showToast(`Applied ${applied} suggestions.`, 'success');
+}
+
+async function showBulkClassifyModal(ids) {
+    _triageBulkIds = ids;
+    try {
+        const res = await fetch('/classifications');
+        const classifications = await res.json();
+        const modal = document.createElement('div');
+        modal.className = 'modal fade';
+        modal.innerHTML = `
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Classify ${ids.length} File(s)</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label class="form-label">Classification</label>
+                            <select class="form-select" id="triageBulkClassSelect">
+                                <option value="">Select a classification</option>
+                                ${classifications.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-primary" onclick="submitTriageBulkClassify()">Classify</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        new bootstrap.Modal(modal).show();
+    } catch(e) {
+        showToast('Error loading classifications.', 'error');
+    }
+}
+
+async function submitTriageBulkClassify() {
+    const classificationId = parseInt(document.getElementById('triageBulkClassSelect')?.value);
+    if (!classificationId) { showToast('Select a classification.', 'warning'); return; }
+    const ids = _triageBulkIds;
+    if (!ids.length) return;
+    try {
+        const res = await fetch('/documents/bulk-classify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_ids: ids, classification_id: classificationId })
+        });
+        if (!res.ok) throw new Error();
+        const modal = document.querySelector('.modal.show');
+        if (modal) { bootstrap.Modal.getInstance(modal).hide(); modal.remove(); }
+        showToast(`${ids.length} files classified.`, 'success');
+        loadTriage();
+    } catch(e) {
+        showToast('Error classifying files.', 'error');
+    }
+}
+
+function bulkClassifySelected() {
+    const checked = [...document.querySelectorAll('.triage-cb:checked')].map(cb => parseInt(cb.dataset.id));
+    if (checked.length === 0) { showToast('Select files first.', 'warning'); return; }
+    showBulkClassifyModal(checked);
+}
+
+// Stores the last loaded analysis data for copyAnalysisSummary()
+let _analysisSnapshot = null;
+
 async function loadAnalysisCharts() {
     const domainParams = getDomainParams();
-    
-    // Gráfico de pizza e tabela resumo
-    const pieCtx = document.getElementById('classPieChart').getContext('2d');
-    const tableBody = document.querySelector('#classSummaryTable tbody');
     const dateSpan = document.getElementById('analysisDate');
-    // Gráfico de barras
-    const barCtx = document.getElementById('patternBarChart').getContext('2d');
+    if (dateSpan) dateSpan.textContent = 'Loading...';
 
-    // 1. Buscar estatísticas de classificação
-    const statsRes = await fetch(`/analysis/stats${domainParams}`);
-    const stats = await statsRes.json();
-    const total = stats.reduce((sum, s) => sum + s.document_count, 0);
-    const labels = stats.map(s => s.name);
-    const data = stats.map(s => s.document_count);
-    const colors = stats.map(s => s.color);
+    try {
+        const [stats, summary] = await Promise.all([
+            fetch(`/analysis/stats${domainParams}`).then(r => r.json()),
+            fetch(`/analysis/summary${domainParams}`).then(r => r.json()),
+        ]);
 
-    // Gráfico de pizza
-    new Chart(pieCtx, {
-        type: 'pie',
-        data: {
-            labels: labels,
-            datasets: [{
-                data: data,
-                backgroundColor: colors,
-            }]
-        },
-        options: {
-            plugins: {
-                legend: { position: 'bottom' },
-                title: { display: true, text: 'Distribution of Documents by Classification' }
-            }
+        _analysisSnapshot = { stats, summary };
+
+        // Stat cards
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+        set('statTotalFiles', summary.total_files ?? 0);
+        const classifiedPct = summary.total_files ? Math.round((summary.classified_files / summary.total_files) * 100) : 0;
+        set('statClassified', `${summary.classified_files ?? 0} (${classifiedPct}%)`);
+        set('statCritical', summary.critical_files ?? 0);
+        set('statHosts', summary.total_hosts ?? 0);
+
+        // Pie chart
+        const pieCtx = document.getElementById('classPieChart')?.getContext('2d');
+        if (pieCtx && stats.length > 0) {
+            new Chart(pieCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: stats.map(s => s.name),
+                    datasets: [{ data: stats.map(s => s.document_count), backgroundColor: stats.map(s => s.color), borderWidth: 2 }]
+                },
+                options: {
+                    plugins: { legend: { position: 'bottom', labels: { padding: 12, font: { size: 12 } } } },
+                    cutout: '55%'
+                }
+            });
         }
-    });
 
-    // Tabela resumo
-    tableBody.innerHTML = stats.map(s => `
-        <tr>
-            <td><span class="badge" style="background:${s.color};min-width:80px;">${s.name}</span></td>
-            <td>${s.document_count}</td>
-            <td>${total ? ((s.document_count/total)*100).toFixed(1) : 0}%</td>
-        </tr>
-    `).join('');
-
-    // 2. Buscar padrões encontrados (usando a rota de sugestões para contar por regra)
-    const suggRes = await fetch(`/documents/classification-suggestions${domainParams}`);
-    const suggestions = await suggRes.json();
-    // Contar quantos documentos cada regra sugeriu
-    const patternMap = {};
-    suggestions.forEach(s => {
-        if (s.rule_name) {
-            patternMap[s.rule_name] = (patternMap[s.rule_name] || 0) + 1;
+        // Breakdown table
+        const total = stats.reduce((s, c) => s + c.document_count, 0);
+        const tbody = document.querySelector('#classSummaryTable tbody');
+        if (tbody) {
+            tbody.innerHTML = stats.map(s => `
+                <tr>
+                    <td><span class="badge" style="background:${s.color};">${s.name}</span></td>
+                    <td class="text-end fw-bold">${s.document_count}</td>
+                    <td class="text-end text-muted">${total ? ((s.document_count / total) * 100).toFixed(1) : 0}%</td>
+                </tr>
+            `).join('');
         }
-    });
-    const patternLabels = Object.keys(patternMap);
-    const patternData = Object.values(patternMap);
-    // Gráfico de barras
-    new Chart(barCtx, {
-        type: 'bar',
-        data: {
-            labels: patternLabels,
-            datasets: [{
-                label: 'Documents found',
-                data: patternData,
-                backgroundColor: '#fd7e14',
-            }]
-        },
-        options: {
-            plugins: {
-                legend: { display: false },
-                title: { display: true, text: 'Main Sensitive Patterns Found' }
-            },
-            scales: {
-                x: { title: { display: true, text: 'Rule/Pattern' } },
-                y: { title: { display: true, text: 'Quantity' }, beginAtZero: true }
-            }
+        const totalsEl = document.getElementById('classificationTotals');
+        if (totalsEl) {
+            const unclassified = (summary.total_files ?? 0) - (summary.classified_files ?? 0);
+            totalsEl.innerHTML = `<strong>${total}</strong> classified &nbsp;·&nbsp; <strong>${unclassified}</strong> unclassified &nbsp;·&nbsp; <strong>${summary.total_files ?? 0}</strong> total`;
         }
-    });
 
-    // Data/hora da análise
-    dateSpan.textContent = new Date().toLocaleString();
+        // Top patterns bar chart (horizontal)
+        const patterns = summary.top_patterns || [];
+        const patCtx = document.getElementById('patternBarChart')?.getContext('2d');
+        if (patCtx && patterns.length > 0) {
+            new Chart(patCtx, {
+                type: 'bar',
+                data: {
+                    labels: patterns.map(p => p.pattern.length > 28 ? p.pattern.slice(0, 26) + '…' : p.pattern),
+                    datasets: [{ data: patterns.map(p => p.count), backgroundColor: '#fd7e14', borderRadius: 4 }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    plugins: { legend: { display: false } },
+                    scales: { x: { beginAtZero: true, ticks: { precision: 0 } }, y: { ticks: { font: { size: 11 } } } }
+                }
+            });
+        } else if (patCtx) {
+            document.getElementById('patternBarChart').parentElement.innerHTML += '<p class="text-muted small text-center mt-2">No pattern data. Run a scan with -m or -r flags.</p>';
+        }
+
+        // Top hosts bar chart (horizontal)
+        const hosts = summary.top_hosts || [];
+        const hostCtx = document.getElementById('hostBarChart')?.getContext('2d');
+        if (hostCtx && hosts.length > 0) {
+            new Chart(hostCtx, {
+                type: 'bar',
+                data: {
+                    labels: hosts.map(h => h.host),
+                    datasets: [{ data: hosts.map(h => h.count), backgroundColor: '#3498db', borderRadius: 4 }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    plugins: { legend: { display: false } },
+                    scales: { x: { beginAtZero: true, ticks: { precision: 0 } }, y: { ticks: { font: { size: 11 } } } }
+                }
+            });
+        } else if (hostCtx) {
+            document.getElementById('hostBarChart').parentElement.innerHTML += '<p class="text-muted small text-center mt-2">No host data yet.</p>';
+        }
+
+        if (dateSpan) dateSpan.textContent = `Generated ${new Date().toLocaleString()}`;
+
+    } catch (err) {
+        console.error('Error loading analysis:', err);
+        showToast('Error loading analysis data.', 'error');
+    }
+}
+
+function copyAnalysisSummary() {
+    const d = _analysisSnapshot;
+    if (!d) { showToast('Load analysis first.', 'warning'); return; }
+    const { stats, summary } = d;
+    const total = stats.reduce((s, c) => s + c.document_count, 0);
+    const unclassified = (summary.total_files ?? 0) - (summary.classified_files ?? 0);
+    const pct = summary.total_files ? ((summary.classified_files / summary.total_files) * 100).toFixed(1) : 0;
+
+    let text = `NullFang Findings Summary — ${new Date().toLocaleString()}\n`;
+    text += `${'─'.repeat(48)}\n\n`;
+    text += `Files Found:   ${summary.total_files ?? 0} across ${summary.total_hosts ?? 0} hosts\n`;
+    text += `Classified:    ${summary.classified_files ?? 0} of ${summary.total_files ?? 0} (${pct}%)\n\n`;
+    text += `Classifications:\n`;
+    stats.forEach(s => {
+        const p = total ? ((s.document_count / total) * 100).toFixed(1) : '0.0';
+        text += `  ${s.name.padEnd(16)} ${String(s.document_count).padStart(5)} files  (${p}%)\n`;
+    });
+    text += `  ${'─'.repeat(32)}\n`;
+    text += `  ${'Unclassified'.padEnd(16)} ${String(unclassified).padStart(5)} files\n`;
+
+    const patterns = summary.top_patterns || [];
+    if (patterns.length > 0) {
+        text += `\nTop Patterns Found:\n`;
+        patterns.forEach(p => { text += `  ${p.pattern.padEnd(30)} ${p.count} files\n`; });
+    }
+    const hosts = summary.top_hosts || [];
+    if (hosts.length > 0) {
+        text += `\nTop Hosts by Files Found:\n`;
+        hosts.forEach(h => { text += `  ${h.host.padEnd(30)} ${h.count} files\n`; });
+    }
+
+    navigator.clipboard.writeText(text)
+        .then(() => showToast('Summary copied to clipboard.', 'success'))
+        .catch(() => showToast('Copy failed — check clipboard permissions.', 'error'));
 }
 
 function loadClassifications() {
@@ -976,8 +1348,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Carregar conteúdo inicial
-    const initialRoute = window.location.pathname || '/';
-    loadContent(initialRoute);
+    navigate('/triage');
 
     // Adicione outras funções usadas em onclick conforme necessário
     window.navigate = navigate;
@@ -989,11 +1360,23 @@ document.addEventListener('DOMContentLoaded', () => {
     window.showNewRuleModal = showNewRuleModal;
     window.createClassification = createClassification;
     window.changePage = changePage;
+    window.copyAnalysisSummary = copyAnalysisSummary;
     window.downloadReport = downloadReport;
     window.editRule = editRule;
     window.updateRule = updateRule;
     window.deleteRule = deleteRule;
     window.applySuggestion = applySuggestion;
+    // Triage functions
+    window.loadTriage = loadTriage;
+    window.filterTriage = filterTriage;
+    window.clearTriageFilters = clearTriageFilters;
+    window.changeTriagePage = changeTriagePage;
+    window.toggleTriageSelectAll = toggleTriageSelectAll;
+    window.applySuggestionDirect = applySuggestionDirect;
+    window.applyAllSuggestionsInline = applyAllSuggestionsInline;
+    window.bulkClassifySelected = bulkClassifySelected;
+    window.showBulkClassifyModal = showBulkClassifyModal;
+    window.submitTriageBulkClassify = submitTriageBulkClassify;
 });
 
 // Funções de manipulação de classificações
@@ -1405,15 +1788,24 @@ let infrastructureNetwork = null;
 // Variáveis globais para filtros
 let selectedUserType = 'all'; // 'all', 'admin', 'nonadmin'
 
-async function loadInfrastructureData() {
+async function loadInfrastructureData(skipAutoPopulate = false) {
+    const container = document.getElementById('infrastructureGraph');
+    if (container) container.innerHTML = '<div class="d-flex justify-content-center align-items-center h-100"><div class="spinner-border text-primary me-2"></div><span>Loading infrastructure data...</span></div>';
     try {
-        // Carregar dados
         const [hosts, users, shares, access] = await Promise.all([
             fetch('/infrastructure/hosts' + getDomainParams()).then(r => r.json()),
             fetch('/infrastructure/users' + getDomainParams()).then(r => r.json()),
             fetch('/infrastructure/shares' + getDomainParams()).then(r => r.json()),
             fetch('/infrastructure/access' + getDomainParams()).then(r => r.json())
         ]);
+
+        // Auto-populate if tables are empty and this is the first load
+        if (!skipAutoPopulate && hosts.length === 0 && users.length === 0 && shares.length === 0) {
+            if (container) container.innerHTML = '<div class="d-flex justify-content-center align-items-center h-100"><div class="spinner-border text-primary me-2"></div><span>Building infrastructure map from scan data...</span></div>';
+            await fetch('/infrastructure/populate', { method: 'POST' });
+            return loadInfrastructureData(true);
+        }
+
         infrastructureGraphData = { hosts, users, shares, access };
         updateInfrastructureStats(hosts, users, shares, access);
         renderInfrastructureFilters();
@@ -1487,6 +1879,17 @@ function renderInfrastructureGraph() {
 
     const nodes = new vis.DataSet();
     const edges = new vis.DataSet();
+
+    // No data at all — show empty state
+    const totalItems = infrastructureGraphData.hosts.length + infrastructureGraphData.users.length + infrastructureGraphData.shares.length;
+    if (totalItems === 0) {
+        container.innerHTML = `<div class="d-flex flex-column justify-content-center align-items-center h-100 text-muted">
+            <i class="bi bi-diagram-3" style="font-size:3rem;opacity:0.3;"></i>
+            <p class="mt-3">No infrastructure data found.</p>
+            <small>Run a scan first, then click <strong>Update Data</strong> to import.</small>
+        </div>`;
+        return;
+    }
 
     // Adicionar nós de domínio
     const domains = Array.from(new Set([
