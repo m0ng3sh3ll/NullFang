@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	smb2 "github.com/m0ng3sh3ll/NullFang/go-smb2-patch"
@@ -107,6 +108,10 @@ type SearchConfig struct {
 	// Delay entre operações SMB para evitar sobrecarga do servidor
 	OperationDelay time.Duration
 
+	// DirConcurrency: max concurrent directory opens (semaphore).
+	// Higher values increase parallelism in deep trees.
+	DirConcurrency int
+
 	// Randomize entry/share iteration order (stealth: avoids sequential access pattern)
 	RandomizeOrder bool
 
@@ -120,6 +125,10 @@ type SearchConfig struct {
 	// Delta mode: skip files whose mod_time has not changed since last scan
 	DeltaMode  bool
 	KnownFiles map[string]time.Time // "shareName\path" → last recorded mod_time
+
+	// Scan statistics (updated atomically during scan)
+	DirsScanned  int32
+	FilesScanned int32
 }
 
 // SearchResult represents a search result
@@ -206,6 +215,10 @@ func (wp *WorkerPool) worker(ctx context.Context, fileContentCache *scanner.File
 		default:
 			logger.Debug("[DEBUG] Worker processing file: %s", job.filePath)
 			processFile(ctx, job, wp.results, fileContentCache)
+			// Pacing: delay between file ops to avoid burst RST
+			if job.config.OperationDelay > 0 {
+				time.Sleep(humanBrowseDelay(job.config.OperationDelay / 2))
+			}
 		}
 	}
 	logger.Debug("[DEBUG] Worker exited the job loop (channel closed)")
@@ -238,6 +251,7 @@ func NewSearchConfig() *SearchConfig {
 		MaxCacheFileSize:        1024 * 1024,            // 1MB default
 		FilterLargeFiles:        false,                  // Default to disabled
 		OperationDelay:          150 * time.Millisecond, // Base para humanBrowseDelay entre diretórios
+		DirConcurrency:          4,                      // Max concurrent directory opens
 		RandomizeOrder:          true,                   // Randomize share/dir order by default (stealth)
 		SkipCanaryFiles:         true,                   // Skip honeypot/canary files by default
 		CanaryPatterns:          defaultCanaryPatterns(),
@@ -300,11 +314,13 @@ func SearchShare(fs *smb2.Share, shareName string, startPath string, config *Sea
 		return nil
 	}
 
+	logger.Info("[*] Scanning share: %s", shareName)
+
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
 	defer cancel()
 
 	wp := NewWorkerPool(config.MaxWorkers, results)
-	dc := NewDirCache(config.DirCacheTTL)
+	dc := NewDirCache(config.DirCacheTTL, config.DirConcurrency)
 	wp.Start(ctx, fileContentCache)
 
 	// --- INÍCIO DO KEEP-ALIVE ---
@@ -320,13 +336,13 @@ func SearchShare(fs *smb2.Share, shareName string, startPath string, config *Sea
 			case <-done:
 				return
 			case <-ticker.C:
-				// Verificar novamente se done foi fechado antes de fazer Stat
+				// Verificar novamente se done foi fechado antes de fazer Echo
 				select {
 				case <-done:
 					return
 				default:
 					logger.Debug("[KEEP-ALIVE] Ticker triggered for share: %s", shareName)
-					_, err := fs.Stat(".")
+					err := fs.Echo()
 					if err != nil {
 						logger.Debug("[KEEP-ALIVE] Error keeping SMB session alive: %v", err)
 					} else {
@@ -346,6 +362,10 @@ func SearchShare(fs *smb2.Share, shareName string, startPath string, config *Sea
 	close(wp.jobs)
 	wp.wg.Wait()
 	logger.Debug("[DEBUG] All workers finished in SearchShare for %s", shareName)
+
+	dirs := atomic.LoadInt32(&config.DirsScanned)
+	files := atomic.LoadInt32(&config.FilesScanned)
+	logger.Success("[+] %s — scan complete (%d dirs, %d files)", shareName, dirs, files)
 
 	// close(results)
 	return err
@@ -495,6 +515,7 @@ func joinSMBPath(elem ...string) string {
 type DirCache struct {
 	cache sync.Map
 	ttl   time.Duration
+	sem   chan struct{} // semaphore: max concurrent directory opens (human-like pacing)
 }
 
 type CacheEntry struct {
@@ -502,9 +523,13 @@ type CacheEntry struct {
 	expiry  time.Time
 }
 
-func NewDirCache(ttl time.Duration) *DirCache {
+func NewDirCache(ttl time.Duration, maxConcurrent int) *DirCache {
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
 	return &DirCache{
 		ttl: ttl,
+		sem: make(chan struct{}, maxConcurrent),
 	}
 }
 
@@ -1008,6 +1033,7 @@ EntryLoop:
 		}
 
 		if entry.IsDir() {
+			atomic.AddInt32(&config.DirsScanned, 1)
 			logger.Debug("[DEBUG] Found directory: %s", entryPath)
 			if config.Verbose {
 				if !sendResultSafely(ctx, results, &SearchResult{
@@ -1041,8 +1067,10 @@ EntryLoop:
 			case <-time.After(humanBrowseDelay(config.OperationDelay)):
 			}
 			wg.Add(1)
+			dc.sem <- struct{}{} // acquire: block if max concurrent dir opens reached
 			go func(path string) {
 				defer wg.Done()
+				defer func() { <-dc.sem }() // release
 				logger.Debug("[DEBUG] Recursion in directory: %s", path)
 				if err := searchDirectoryWithContext(ctx, fs, shareName, path, config, results, depth+1, wp, dc); err != nil {
 					errChan <- err
@@ -1149,6 +1177,7 @@ EntryLoop:
 			}
 
 			// Processa o arquivo para outros tipos de match
+			atomic.AddInt32(&config.FilesScanned, 1)
 			logger.Debug("[DEBUG] Sending job to worker pool: %s", entryPath)
 			select {
 			case <-ctx.Done():

@@ -88,6 +88,12 @@ func (c *Session) Logoff() error {
 	return c.s.logoff(c.ctx)
 }
 
+// Echo sends an SMB2 ECHO command to keep the session alive.
+// Lower overhead than a Stat call; generates fewer audit events.
+func (c *Session) Echo() error {
+	return c.s.echo(c.ctx)
+}
+
 // Mount mounts the SMB share.
 // sharename must follow format like `<share>` or `\\<server>\<share>`.
 // Note that the mounted share doesn't inherit session's context.
@@ -440,6 +446,12 @@ func (fs *Share) WithContext(ctx context.Context) *Share {
 // Umount disconects the current SMB tree.
 func (fs *Share) Umount() error {
 	return fs.treeConn.disconnect(fs.ctx)
+}
+
+// Echo sends SMB2 ECHO to keep the session alive.
+// Available on Share for keepalive use from callers.
+func (fs *Share) Echo() error {
+	return fs.session.echo(fs.ctx)
 }
 
 func (fs *Share) Create(name string) (*File, error) {

@@ -120,6 +120,10 @@ type ScanSettings struct {
 
 		// MaxDate: only process files modified on or before this date (YYYY-MM-DD). Default: "".
 		MaxDate string `yaml:"max_date"`
+
+		// DirConcurrency: max concurrent directory opens during recursive scan. Default: 4.
+		// Higher values speed up deep trees but increase concurrent SMB ops.
+		DirConcurrency int `yaml:"dir_concurrency"`
 	} `yaml:"search"`
 
 	Stealth struct {

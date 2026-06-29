@@ -135,8 +135,15 @@ func showHelp() {
 	fmt.Println("  -summary         Show historical scan summary for -d <domain> (standalone)")
 
 	fmt.Println("")
-	fmt.Println("  All advanced tuning (threads, timeouts, batch sizes, SMB dialect, etc.)")
-	fmt.Println("  is in config/nullfang.yaml — copy and edit the template.")
+	fmt.Println("─────────────────────────────")
+	fmt.Println(" Performance & Tuning")
+	fmt.Println("─────────────────────────────")
+	fmt.Println("  -threads int             Host concurrency & workers  (default: 5)")
+	fmt.Println("  -operation-delay int     Per-entry delay in ms between SMB ops  (default: 300)")
+	fmt.Println("  -dir-concurrency int     Max concurrent directory opens  (default: 4)")
+	fmt.Println("  -lockout-threshold       Halt scan after N auth failures to prevent AD lockout  (default: 1)")
+	fmt.Println("")
+	fmt.Println("  More advanced tuning → config/nullfang.yaml  (settings.performance section)")
 }
 
 func showFAQ() {

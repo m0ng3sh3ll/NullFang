@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -220,6 +219,8 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 		Password:    *passwordFlag,
 		Timeout:     30 * time.Second, // TCP dial timeout; sessão é gerenciada pelo host context (5min)
 		Socks5Proxy: *socks5Flag,
+		Dialect:     copyConfig.Dialect,
+		Signing:     copyConfig.Signing,
 	}
 
 	// Configure authentication
@@ -444,9 +445,31 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 			simpleShares[k] = v.Share
 		}
 
-		// Collect all results, dedup by path+share, then sort by priority score.
+		// Keepalive runs during search + copy: Echo on each share every 10s.
+		// Prevents SMB session timeout during long operations.
+		keepaliveCtx, keepaliveStop := context.WithCancel(context.Background())
+		defer keepaliveStop()
+		for _, s := range simpleShares {
+			s := s
+			go func() {
+				ticker := time.NewTicker(10 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-keepaliveCtx.Done():
+						return
+					case <-ticker.C:
+						if err := s.Echo(); err != nil && *verboseFlag {
+							logger.Debug("[KEEP-ALIVE] Echo error: %v", err)
+						}
+					}
+				}
+			}()
+		}
+
+		// Process each result immediately as it arrives (streaming copy).
+		// Dedup by share+path to avoid copying the same file multiple times.
 		seen := make(map[string]struct{})
-		var collected []*search.SearchResult
 		for result := range resultsChan {
 			key := result.ShareName + "|" + result.FilePath
 			if _, dup := seen[key]; dup {
@@ -456,16 +479,8 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 				continue
 			}
 			seen[key] = struct{}{}
-			collected = append(collected, result)
-		}
 
-		// Sort highest score first so high-value files are copied before timeouts can interrupt.
-		sort.Slice(collected, func(i, j int) bool {
-			return collected[i].Score > collected[j].Score
-		})
-
-		for _, result := range collected {
-			_, err := copyutil.CopySingleMatch(ctx, db, simpleShares, result, copyConfig, host, nil)
+			_, err := copyutil.CopySingleMatch(ctx, db, simpleShares, result, copyConfig, host, throttler)
 			if err != nil {
 				logger.Error("[-] Failed to copy %s: %v", result.FilePath, err)
 			}

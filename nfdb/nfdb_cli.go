@@ -18,10 +18,10 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/bubbletea"
 	"github.com/m0ng3sh3ll/NullFang/utils"
-	_ "modernc.org/sqlite"
 	"github.com/sahilm/fuzzy"
+	_ "modernc.org/sqlite"
 )
 
 var currentDomain string
@@ -44,6 +44,8 @@ type model struct {
 	domains        []string
 	domainList     list.Model
 	selectedDomain string
+	selectedHost   string
+	selectedShare  string
 	input          textinput.Model
 	result         string
 	db             *sql.DB
@@ -56,6 +58,8 @@ type model struct {
 	totalPages     int    // total de pÃ¡ginas
 	currentCommand string // comando atual sendo paginado
 	pageSize       int    // tamanho da pÃ¡gina
+	// Terminal width for responsive table rendering
+	termWidth int
 }
 
 type listItem string
@@ -120,6 +124,7 @@ func initialModel(domains []string, db *sql.DB) model {
 		currentPage: 1,
 		totalPages:  1,
 		pageSize:    50,
+		termWidth:   80,
 	}
 }
 
@@ -128,6 +133,10 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Capture terminal resize regardless of state
+	if wm, ok := msg.(tea.WindowSizeMsg); ok {
+		m.termWidth = wm.Width
+	}
 	switch m.state {
 	case stateDomainSelect:
 		var cmd tea.Cmd
@@ -522,10 +531,9 @@ func (m *model) processCommand(cmd string) string {
 	}
 }
 
-// FunÃ§Ã£o utilitÃ¡ria para formatar tabelas bonitas
+// formatTableBox renders an ASCII-only table that works in any terminal.
+// No Unicode box-drawing — uses +, -, |.
 func formatTableBox(title string, headers []string, rows [][]string) string {
-	border := "â•"
-	sep := "â”€"
 	colWidths := make([]int, len(headers))
 	for i, h := range headers {
 		colWidths[i] = len(h)
@@ -541,28 +549,47 @@ func formatTableBox(title string, headers []string, rows [][]string) string {
 	for _, w := range colWidths {
 		totalWidth += w + 3
 	}
+	if totalWidth < 4 {
+		totalWidth = 4
+	}
 	var sb strings.Builder
-	sb.WriteString("â•”" + strings.Repeat(border, totalWidth-2) + "â•—\n")
+	// top border
+	sb.WriteString("+" + strings.Repeat("-", totalWidth-2) + "+\n")
 	if title != "" {
 		titleLine := padCenter(title, totalWidth-2)
-		sb.WriteString("â•‘" + titleLine + "â•‘\n")
-		sb.WriteString("â• " + strings.Repeat(border, totalWidth-2) + "â•£\n")
+		sb.WriteString("|" + titleLine + "|\n")
+		sb.WriteString("+" + strings.Repeat("-", totalWidth-2) + "+\n")
 	}
-	sb.WriteString("â•‘")
+	// header row
+	sb.WriteString("|")
 	for i, h := range headers {
-		sb.WriteString(fmt.Sprintf(" %-*s â”‚", colWidths[i], padCenter(h, colWidths[i])))
+		sb.WriteString(fmt.Sprintf(" %-*s |", colWidths[i], padCenter(h, colWidths[i])))
 	}
 	sb.WriteString("\n")
-	sb.WriteString("â• " + strings.Repeat(sep, totalWidth-2) + "â•£\n")
+	// header separator
+	sb.WriteString("+" + strings.Repeat("-", totalWidth-2) + "+\n")
+	// data rows
 	for _, row := range rows {
-		sb.WriteString("â•‘")
+		sb.WriteString("|")
 		for i, cell := range row {
-			sb.WriteString(fmt.Sprintf(" %-*s â”‚", colWidths[i], cell))
+			sb.WriteString(fmt.Sprintf(" %-*s |", colWidths[i], cell))
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString("â•š" + strings.Repeat(border, totalWidth-2) + "â•\n")
+	// bottom border
+	sb.WriteString("+" + strings.Repeat("-", totalWidth-2) + "+\n")
 	return sb.String()
+}
+
+// truncateCell trims s to at most maxLen, appending "..." if truncated.
+func truncateCell(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
 }
 
 func (m *model) countFiles() int {
@@ -661,8 +688,12 @@ func (m *model) listCredentialsWithPaginationAndCount(page int) (string, int) {
 
 func (m *model) countHosts() int {
 	var count int
-	query := `SELECT COUNT(DISTINCT host) FROM files WHERE LOWER(domain) = ?`
-	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain)).Scan(&count)
+	query := `SELECT COUNT(*) FROM (
+		SELECT DISTINCT host FROM files WHERE LOWER(domain) = ?
+		UNION
+		SELECT DISTINCT host FROM low_hanging_fruit WHERE LOWER(domain) = ?
+	)`
+	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain), strings.ToLower(m.selectedDomain)).Scan(&count)
 	if err != nil {
 		return 0
 	}
@@ -675,8 +706,12 @@ func (m *model) listHosts() string {
 
 func (m *model) listHostsWithPagination(page int) string {
 	offset := (page - 1) * m.pageSize
-	query := `SELECT DISTINCT host FROM files WHERE LOWER(domain) = ? ORDER BY host LIMIT ? OFFSET ?`
-	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), m.pageSize, offset)
+	query := `SELECT host FROM (
+		SELECT DISTINCT host FROM files WHERE LOWER(domain) = ?
+		UNION
+		SELECT DISTINCT host FROM low_hanging_fruit WHERE LOWER(domain) = ?
+	) ORDER BY host LIMIT ? OFFSET ?`
+	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), strings.ToLower(m.selectedDomain), m.pageSize, offset)
 	if err != nil {
 		return fmt.Sprintf("Error querying hosts: %v", err)
 	}
@@ -706,8 +741,12 @@ func (m *model) listHostsWithPaginationAndCount(page int) (string, int) {
 
 func (m *model) countShares() int {
 	var count int
-	query := `SELECT COUNT(DISTINCT share) FROM files WHERE LOWER(domain) = ?`
-	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain)).Scan(&count)
+	query := `SELECT COUNT(*) FROM (
+		SELECT DISTINCT share FROM files WHERE LOWER(domain) = ?
+		UNION
+		SELECT DISTINCT share FROM low_hanging_fruit WHERE LOWER(domain) = ?
+	)`
+	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain), strings.ToLower(m.selectedDomain)).Scan(&count)
 	if err != nil {
 		return 0
 	}
@@ -720,8 +759,12 @@ func (m *model) listShares() string {
 
 func (m *model) listSharesWithPagination(page int) string {
 	offset := (page - 1) * m.pageSize
-	query := `SELECT DISTINCT share FROM files WHERE LOWER(domain) = ? ORDER BY share LIMIT ? OFFSET ?`
-	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), m.pageSize, offset)
+	query := `SELECT share FROM (
+		SELECT DISTINCT share FROM files WHERE LOWER(domain) = ?
+		UNION
+		SELECT DISTINCT share FROM low_hanging_fruit WHERE LOWER(domain) = ?
+	) ORDER BY share LIMIT ? OFFSET ?`
+	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), strings.ToLower(m.selectedDomain), m.pageSize, offset)
 	if err != nil {
 		return fmt.Sprintf("Error querying shares: %v", err)
 	}
@@ -751,8 +794,12 @@ func (m *model) listSharesWithPaginationAndCount(page int) (string, int) {
 
 func (m *model) countUsers() int {
 	var count int
-	query := `SELECT COUNT(DISTINCT user) FROM files WHERE LOWER(domain) = ?`
-	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain)).Scan(&count)
+	query := `SELECT COUNT(*) FROM (
+		SELECT DISTINCT user FROM files WHERE LOWER(domain) = ?
+		UNION
+		SELECT DISTINCT user FROM low_hanging_fruit WHERE LOWER(domain) = ?
+	)`
+	err := m.db.QueryRowContext(context.Background(), query, strings.ToLower(m.selectedDomain), strings.ToLower(m.selectedDomain)).Scan(&count)
 	if err != nil {
 		return 0
 	}
@@ -765,8 +812,12 @@ func (m *model) listUsers() string {
 
 func (m *model) listUsersWithPagination(page int) string {
 	offset := (page - 1) * m.pageSize
-	query := `SELECT DISTINCT user FROM files WHERE LOWER(domain) = ? ORDER BY user LIMIT ? OFFSET ?`
-	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), m.pageSize, offset)
+	query := `SELECT user FROM (
+		SELECT DISTINCT user FROM files WHERE LOWER(domain) = ?
+		UNION
+		SELECT DISTINCT user FROM low_hanging_fruit WHERE LOWER(domain) = ?
+	) ORDER BY user LIMIT ? OFFSET ?`
+	rows, err := m.db.QueryContext(context.Background(), query, strings.ToLower(m.selectedDomain), strings.ToLower(m.selectedDomain), m.pageSize, offset)
 	if err != nil {
 		return fmt.Sprintf("Error querying users: %v", err)
 	}
@@ -1250,9 +1301,6 @@ func main() {
 }
 
 func printTableBox(title string, headers []string, rows [][]string) {
-	border := "â•"
-	sep := "â”€"
-	// Calcula o tamanho de cada coluna
 	colWidths := make([]int, len(headers))
 	for i, h := range headers {
 		colWidths[i] = len(h)
@@ -1264,41 +1312,42 @@ func printTableBox(title string, headers []string, rows [][]string) {
 			}
 		}
 	}
-	// Calcula largura total da tabela
-	totalWidth := 1 // borda esquerda
+	totalWidth := 1
 	for _, w := range colWidths {
-		totalWidth += w + 3 // espaÃ§o + borda
+		totalWidth += w + 3
+	}
+	if totalWidth < 4 {
+		totalWidth = 4
 	}
 	// Topo
-	fmt.Printf("â•”%sâ•—\n", strings.Repeat(border, totalWidth-2))
+	fmt.Printf("+%s+\n", strings.Repeat("-", totalWidth-2))
 	if title != "" {
-		fmt.Printf("â•‘%sâ•‘\n", padCenter(title, totalWidth-2))
-		fmt.Printf("â• %sâ•£\n", strings.Repeat(border, totalWidth-2))
+		fmt.Printf("|%s|\n", padCenter(title, totalWidth-2))
+		fmt.Printf("+%s+\n", strings.Repeat("-", totalWidth-2))
 	}
-	// CabeÃ§alho
-	fmt.Print("â•‘")
+	// Cabeçalho
+	fmt.Print("|")
 	for i, h := range headers {
-		fmt.Printf(" %-*s â”‚", colWidths[i], padCenter(h, colWidths[i]))
+		fmt.Printf(" %-*s |", colWidths[i], padCenter(h, colWidths[i]))
 	}
 	fmt.Println()
-	fmt.Printf("â• %sâ•£\n", strings.Repeat(sep, totalWidth-2))
+	fmt.Printf("+%s+\n", strings.Repeat("-", totalWidth-2))
 	// Linhas
 	for _, row := range rows {
-		fmt.Print("â•‘")
+		fmt.Print("|")
 		for i, cell := range row {
-			fmt.Printf(" %-*s â”‚", colWidths[i], cell)
+			fmt.Printf(" %-*s |", colWidths[i], cell)
 		}
 		fmt.Println()
 	}
-	fmt.Printf("â•š%sâ•\n", strings.Repeat(border, totalWidth-2))
+	fmt.Printf("+%s+\n", strings.Repeat("-", totalWidth-2))
 }
 
 func printDBCLIBox(title string, lines []string, width int) {
-	border := "â•"
-	fmt.Printf("â•”%sâ•—\n", strings.Repeat(border, width-2))
+	fmt.Printf("+%s+\n", strings.Repeat("-", width-2))
 	if title != "" {
-		fmt.Printf("â•‘%sâ•‘\n", padCenter(title, width-2))
-		fmt.Printf("â• %sâ•£\n", strings.Repeat(border, width-2))
+		fmt.Printf("|%s|\n", padCenter(title, width-2))
+		fmt.Printf("+%s+\n", strings.Repeat("-", width-2))
 	}
 	for _, line := range lines {
 		for len(line) > 0 {
@@ -1310,11 +1359,12 @@ func printDBCLIBox(title string, lines []string, width int) {
 				part = line
 				line = ""
 			}
-			fmt.Printf("â•‘ %-*s â•‘\n", width-4, part)
+			fmt.Printf("| %-*s |\n", width-4, part)
 		}
 	}
-	fmt.Printf("â•š%sâ•\n", strings.Repeat(border, width-2))
+	fmt.Printf("+%s+\n", strings.Repeat("-", width-2))
 }
+
 func padCenter(s string, width int) string {
 	if len(s) >= width {
 		return s
@@ -1604,7 +1654,7 @@ func listFiles(db *sql.DB, filters ...string) {
 	limit := 50
 	offset := (page - 1) * limit
 
-	query := "SELECT id, path, share, domain, user, size, mod_time, file_type, match_pattern, match_type, local_path, leet_speak, search_param_type, search_param_value, parent_id FROM files WHERE LOWER(domain) = ?"
+	query := "SELECT id, path, share, domain, user, size, mod_time, file_type, match_pattern, match_type, local_path, leet_speak, search_param_type, search_param_value, parent_id, scan_mode FROM files WHERE LOWER(domain) = ?"
 	var args []interface{}
 	args = append(args, strings.ToLower(domain))
 	if user != "" {
@@ -1633,6 +1683,7 @@ func listFiles(db *sql.DB, filters ...string) {
 		Size                                                                                                                  int64
 		ModTime                                                                                                               string
 		ParentID                                                                                                              sql.NullInt64
+		ScanMode                                                                                                              string
 	}
 	for rows.Next() {
 		var r struct {
@@ -1641,8 +1692,9 @@ func listFiles(db *sql.DB, filters ...string) {
 			Size                                                                                                                  int64
 			ModTime                                                                                                               string
 			ParentID                                                                                                              sql.NullInt64
+			ScanMode                                                                                                              string
 		}
-		rows.Scan(&r.ID, &r.Path, &r.Share, &r.Domain, &r.User, &r.Size, &r.ModTime, &r.FileType, &r.MatchPattern, &r.MatchType, &r.LocalPath, &r.LeetSpeak, &r.SearchParamType, &r.SearchParamValue, &r.ParentID)
+		rows.Scan(&r.ID, &r.Path, &r.Share, &r.Domain, &r.User, &r.Size, &r.ModTime, &r.FileType, &r.MatchPattern, &r.MatchType, &r.LocalPath, &r.LeetSpeak, &r.SearchParamType, &r.SearchParamValue, &r.ParentID, &r.ScanMode)
 		fileRows = append(fileRows, r)
 		allIDs[r.ID] = struct{}{}
 		if r.ParentID.Valid {
@@ -1705,9 +1757,13 @@ func listHosts(db *sql.DB, filters ...string) {
 	limit := 50
 	offset := (page - 1) * limit
 
-	query := "SELECT DISTINCT host FROM files WHERE LOWER(domain) = ? ORDER BY host LIMIT ? OFFSET ?"
+	query := `SELECT host FROM (
+		SELECT DISTINCT host FROM files WHERE LOWER(domain) = ?
+		UNION
+		SELECT DISTINCT host FROM low_hanging_fruit WHERE LOWER(domain) = ?
+	) ORDER BY host LIMIT ? OFFSET ?`
 	var args []interface{}
-	args = append(args, strings.ToLower(domain), limit, offset)
+	args = append(args, strings.ToLower(domain), strings.ToLower(domain), limit, offset)
 
 	rows, err := db.QueryContext(context.Background(), query, args...)
 	if err != nil {
@@ -1736,9 +1792,13 @@ func listShares(db *sql.DB, filters ...string) {
 	filterMap := parseFilters(filters)
 	host := filterMap["host"]
 
-	query := "SELECT DISTINCT share FROM files WHERE LOWER(domain) = ?"
+	query := `SELECT share FROM (
+		SELECT DISTINCT share, host FROM files WHERE LOWER(domain) = ?
+		UNION
+		SELECT DISTINCT share, host FROM low_hanging_fruit WHERE LOWER(domain) = ?
+	) WHERE 1=1`
 	var args []interface{}
-	args = append(args, strings.ToLower(domain))
+	args = append(args, strings.ToLower(domain), strings.ToLower(domain))
 	if host != "" {
 		query += " AND LOWER(host) = ?"
 		args = append(args, strings.ToLower(host))

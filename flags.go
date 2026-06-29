@@ -87,7 +87,7 @@ var (
 	// Not exposed as CLI flags. Set via the `settings:` block in -config YAML
 	// or automatically by --stealth. See config/nullfang.yaml for full docs.
 
-	threadsFlag          = func() *int           { v := 10; return &v }()
+	threadsFlag          = flag.Int("threads", 5, "Number of concurrent hosts (default 5)")
 	timeoutFlag          = func() *time.Duration { v := 5 * time.Minute; return &v }()
 	copyTimeoutFlag      = func() *time.Duration { v := 2 * time.Minute; return &v }()
 	authTimeoutFlag      = func() *time.Duration { v := 30 * time.Second; return &v }()
@@ -122,7 +122,8 @@ var (
 	noCopyDeepFlag       = func() *bool          { v := false; return &v }()
 	machineFlag          = func() *bool          { v := false; return &v }()
 	quietFlag            = func() *bool          { v := false; return &v }()
-	operationDelayMsFlag    = func() *int  { v := 0; return &v }()    // per-entry delay; 0 = disabled
+	operationDelayMsFlag    = flag.Int("operation-delay", 300, "Per-entry delay in ms between SMB ops (0=disabled)")
+	dirConcurrencyFlag      = flag.Int("dir-concurrency", 4, "Max concurrent directory opens (default 4)")
 	lockoutThresholdFlag    = flag.Int("lockout-threshold", 1, "Halt scan after N auth failures to prevent account lockout (0 = disabled)")
 	hashDedupFlag           = func() *bool { v := true; return &v }() // enabled by default
 )

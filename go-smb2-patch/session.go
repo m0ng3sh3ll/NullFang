@@ -375,6 +375,13 @@ func (s *session) logoff(ctx context.Context) error {
 	return nil
 }
 
+func (s *session) echo(ctx context.Context) error {
+	req := new(EchoRequest)
+	req.CreditCharge = 1
+	_, err := s.sendRecv(SMB2_ECHO, req, ctx)
+	return err
+}
+
 func (s *session) sendRecv(cmd uint16, req Packet, ctx context.Context) (res []byte, err error) {
 	rr, err := s.send(req, ctx)
 	if err != nil {

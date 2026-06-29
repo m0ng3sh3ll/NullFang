@@ -62,6 +62,9 @@ type CopyConfig struct {
 	// Deep copy mode - copy files even if they are not in the original directory
 	NoCopyDeep bool
 
+	// ScanMode: "recon", "search", "exfil" — tracks how the file was found (stored in DB)
+	ScanMode string
+
 	// Filename patterns to match for large files
 	FilenamePatterns []string
 
@@ -575,6 +578,7 @@ func NewCopyConfig() *CopyConfig {
 		PreserveStructure:   true, //default true
 		Verbose:             true,
 		LeetSpeak:           false,
+		ScanMode:            "exfil",
 	}
 }
 
@@ -800,9 +804,9 @@ func CopyMatchedFiles(ctx context.Context, db *sql.DB, shares map[string]*smb2.S
 
 		// Se estiver em modo no-copy, adicionar ao resultado da varredura
 		if config.NoCopy || config.NoCopyDeep {
-			scanMode := "no-copy"
+			lhfMode := "no-copy"
 			if config.NoCopyDeep {
-				scanMode = "no-copy-deep"
+				lhfMode = "no-copy-deep"
 			}
 			inserted, err := database.InsertLowHangingFruit(
 				db,
@@ -817,7 +821,7 @@ func CopyMatchedFiles(ctx context.Context, db *sql.DB, shares map[string]*smb2.S
 				result.MatchValue,
 				result.MatchType,
 				formatSize(result.FileSize),
-				scanMode,
+				lhfMode,
 				result.FileSize > config.MaxFileSize,
 			)
 			if err != nil {
@@ -825,6 +829,32 @@ func CopyMatchedFiles(ctx context.Context, db *sql.DB, shares map[string]*smb2.S
 			}
 			if inserted {
 				newLHFCount++
+			}
+			// Also save to files table so nfdb queries (hosts/users/shares) work
+			dbErr := database.InsertFile(
+				db,
+				result.FilePath,
+				scanHost,
+				result.ShareName,
+				config.Domain,
+				config.Username,
+				result.FileSize,
+				time.Now(),
+				"",
+				result.MatchValue,
+				result.MatchType,
+				"",
+				"",
+				formatSize(result.FileSize),
+				result.FileSize > config.MaxFileSize,
+				config.LeetSpeak,
+				"",
+				"",
+				nil,
+				config.ScanMode,
+			)
+			if dbErr != nil {
+				logger.Error("Error saving file record to database: %v", dbErr)
 			}
 			continue
 		}
@@ -1002,7 +1032,8 @@ func CopyMatchedFiles(ctx context.Context, db *sql.DB, shares map[string]*smb2.S
 								config.LeetSpeak,                       // leet_speak
 								inferSearchParamType(result.MatchType), // search_param_type
 								getSearchParamValue(result.MatchType, config, result.RegexMatch), // search_param_value
-								baseID, // parent_id
+									baseID, // parent_id
+								config.ScanMode,
 							)
 							if dbErr != nil {
 								logger.Error("[DB-ERROR] Failed to insert snapshot in database: %v", dbErr)
@@ -1382,6 +1413,7 @@ func CopyMatchedFiles(ctx context.Context, db *sql.DB, shares map[string]*smb2.S
 										job.entry.SearchParamType,
 										job.entry.SearchParamValue,
 										nil, // parent_id = nil
+										config.ScanMode,
 									)
 									if dbErr != nil {
 										logger.Error("[DB-ERROR] Failed to insert base file in database: %v", dbErr)
@@ -1409,6 +1441,7 @@ func CopyMatchedFiles(ctx context.Context, db *sql.DB, shares map[string]*smb2.S
 									job.entry.SearchParamType,
 									job.entry.SearchParamValue,
 									parentID, // parent_id do base
+								config.ScanMode,
 								)
 								if dbErr != nil {
 									logger.Error("[DB-ERROR] Failed to insert snapshot in database: %v", dbErr)
@@ -1717,6 +1750,11 @@ func CopySingleMatch(ctx context.Context, db *sql.DB, shares map[string]*smb2.Sh
 		return nil, nil
 	}
 
+	// Throttler: rate-limit copy bandwidth before SMB ops
+	if throttler != nil {
+		_ = throttler.WaitN(ctx, int(result.FileSize))
+	}
+
 	share, ok := shares[result.ShareName]
 	if !ok {
 		logger.Error("Share not mounted: %s", result.ShareName)
@@ -1818,8 +1856,9 @@ func CopySingleMatch(ctx context.Context, db *sql.DB, shares map[string]*smb2.Sh
 					oldInfo.Size() > config.MaxFileSize,    // large_file
 					config.LeetSpeak,                       // leet_speak
 					inferSearchParamType(result.MatchType), // search_param_type
-					getSearchParamValue(result.MatchType, config, result.RegexMatch), // search_param_value
-					baseID, // parent_id sempre aponta para o base
+				getSearchParamValue(result.MatchType, config, result.RegexMatch), // search_param_value
+				baseID, // parent_id sempre aponta para o base
+				config.ScanMode,
 				)
 				if dbErr != nil {
 					logger.Error("[DB-ERROR] Failed to insert snapshot in database: %v", dbErr)
@@ -1914,6 +1953,7 @@ func CopySingleMatch(ctx context.Context, db *sql.DB, shares map[string]*smb2.Sh
 			inferSearchParamType(result.MatchType),
 			getSearchParamValue(result.MatchType, config, result.RegexMatch),
 			nil,
+			config.ScanMode,
 		)
 		return &CopyResult{
 			ShareName:  result.ShareName,

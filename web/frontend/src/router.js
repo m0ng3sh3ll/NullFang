@@ -113,6 +113,11 @@ const routes = {
 function navigate(route) {
     history.pushState(null, '', route);
     loadContent(route);
+    // Active nav link
+    document.querySelectorAll('#mainNav .nav-link').forEach(el => {
+        const href = el.getAttribute('onclick') || '';
+        el.classList.toggle('active', href.includes(`'${route}'`));
+    });
 }
 
 // Função para carregar conteúdo
@@ -839,6 +844,11 @@ function bulkClassifySelected() {
 // Stores the last loaded analysis data for copyAnalysisSummary()
 let _analysisSnapshot = null;
 
+function destroyChart(canvasId) {
+    const existing = Chart.getChart(canvasId);
+    if (existing) existing.destroy();
+}
+
 async function loadAnalysisCharts() {
     const domainParams = getDomainParams();
     const dateSpan = document.getElementById('analysisDate');
@@ -846,8 +856,14 @@ async function loadAnalysisCharts() {
 
     try {
         const [stats, summary] = await Promise.all([
-            fetch(`/analysis/stats${domainParams}`).then(r => r.json()),
-            fetch(`/analysis/summary${domainParams}`).then(r => r.json()),
+            fetch(`/analysis/stats${domainParams}`).then(async r => {
+                if (!r.ok) throw new Error(`/analysis/stats HTTP ${r.status}: ${await r.text()}`);
+                return r.json();
+            }),
+            fetch(`/analysis/summary${domainParams}`).then(async r => {
+                if (!r.ok) throw new Error(`/analysis/summary HTTP ${r.status}: ${await r.text()}`);
+                return r.json();
+            }),
         ]);
 
         _analysisSnapshot = { stats, summary };
@@ -861,17 +877,23 @@ async function loadAnalysisCharts() {
         set('statHosts', summary.total_hosts ?? 0);
 
         // Pie chart
+        destroyChart('classPieChart');
         const pieCtx = document.getElementById('classPieChart')?.getContext('2d');
         if (pieCtx && stats.length > 0) {
             new Chart(pieCtx, {
                 type: 'doughnut',
                 data: {
                     labels: stats.map(s => s.name),
-                    datasets: [{ data: stats.map(s => s.document_count), backgroundColor: stats.map(s => s.color), borderWidth: 2 }]
+                    datasets: [{ data: stats.map(s => s.document_count), backgroundColor: stats.map(s => s.color), borderWidth: 2, borderColor: '#161b22' }]
                 },
                 options: {
-                    plugins: { legend: { position: 'bottom', labels: { padding: 12, font: { size: 12 } } } },
-                    cutout: '55%'
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: { padding: 14, font: { size: 12 }, color: '#8b949e' }
+                        }
+                    },
+                    cutout: '58%'
                 }
             });
         }
@@ -896,49 +918,55 @@ async function loadAnalysisCharts() {
 
         // Top patterns bar chart (horizontal)
         const patterns = summary.top_patterns || [];
+        destroyChart('patternBarChart');
         const patCtx = document.getElementById('patternBarChart')?.getContext('2d');
+        const darkScales = {
+            x: { beginAtZero: true, ticks: { precision: 0, color: '#8b949e', font: { size: 11 } }, grid: { color: '#21262d' } },
+            y: { ticks: { color: '#8b949e', font: { size: 11 } }, grid: { color: '#21262d' } }
+        };
+
         if (patCtx && patterns.length > 0) {
             new Chart(patCtx, {
                 type: 'bar',
                 data: {
-                    labels: patterns.map(p => p.pattern.length > 28 ? p.pattern.slice(0, 26) + '…' : p.pattern),
-                    datasets: [{ data: patterns.map(p => p.count), backgroundColor: '#fd7e14', borderRadius: 4 }]
+                    labels: patterns.map(p => p.pattern.length > 30 ? p.pattern.slice(0, 28) + '…' : p.pattern),
+                    datasets: [{ data: patterns.map(p => p.count), backgroundColor: '#fd7e14', borderRadius: 4, borderSkipped: false }]
                 },
                 options: {
                     indexAxis: 'y',
                     plugins: { legend: { display: false } },
-                    scales: { x: { beginAtZero: true, ticks: { precision: 0 } }, y: { ticks: { font: { size: 11 } } } }
+                    scales: darkScales
                 }
             });
         } else if (patCtx) {
-            document.getElementById('patternBarChart').parentElement.innerHTML += '<p class="text-muted small text-center mt-2">No pattern data. Run a scan with -m or -r flags.</p>';
+            document.getElementById('patternBarChart').parentElement.innerHTML += '<p class="text-muted small text-center mt-3">No pattern data — run a scan with <code>-m</code> or <code>-r</code>.</p>';
         }
 
-        // Top hosts bar chart (horizontal)
         const hosts = summary.top_hosts || [];
+        destroyChart('hostBarChart');
         const hostCtx = document.getElementById('hostBarChart')?.getContext('2d');
         if (hostCtx && hosts.length > 0) {
             new Chart(hostCtx, {
                 type: 'bar',
                 data: {
                     labels: hosts.map(h => h.host),
-                    datasets: [{ data: hosts.map(h => h.count), backgroundColor: '#3498db', borderRadius: 4 }]
+                    datasets: [{ data: hosts.map(h => h.count), backgroundColor: '#58a6ff', borderRadius: 4, borderSkipped: false }]
                 },
                 options: {
                     indexAxis: 'y',
                     plugins: { legend: { display: false } },
-                    scales: { x: { beginAtZero: true, ticks: { precision: 0 } }, y: { ticks: { font: { size: 11 } } } }
+                    scales: darkScales
                 }
             });
         } else if (hostCtx) {
-            document.getElementById('hostBarChart').parentElement.innerHTML += '<p class="text-muted small text-center mt-2">No host data yet.</p>';
+            document.getElementById('hostBarChart').parentElement.innerHTML += '<p class="text-muted small text-center mt-3">No host data yet.</p>';
         }
 
         if (dateSpan) dateSpan.textContent = `Generated ${new Date().toLocaleString()}`;
 
     } catch (err) {
         console.error('Error loading analysis:', err);
-        showToast('Error loading analysis data.', 'error');
+        showToast('Analysis error: ' + (err.message || err), 'error');
     }
 }
 

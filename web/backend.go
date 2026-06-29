@@ -553,7 +553,7 @@ func (s *Server) getClassificationStats(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var stats []map[string]interface{}
+	stats := []map[string]interface{}{}
 	for rows.Next() {
 		var s struct {
 			ID            int
@@ -595,7 +595,7 @@ func (s *Server) getSensitivityMap(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var mapData []map[string]interface{}
+	mapData := []map[string]interface{}{}
 	for rows.Next() {
 		var m struct {
 			ID            int
@@ -659,10 +659,10 @@ func (s *Server) getAnalysisSummary(c *gin.Context) {
 	s.db.QueryRow("SELECT COUNT(DISTINCT f.host) FROM files f WHERE 1=1"+domainClause("f.domain"), domainArg(true)...).Scan(&totalHosts)
 	result["total_hosts"] = totalHosts
 
+	topHosts := []map[string]interface{}{}
 	hostRows, err := s.db.Query("SELECT f.host, COUNT(*) as cnt FROM files f WHERE 1=1"+domainClause("f.domain")+" GROUP BY f.host ORDER BY cnt DESC LIMIT 10", domainArg(true)...)
 	if err == nil {
 		defer hostRows.Close()
-		var topHosts []map[string]interface{}
 		for hostRows.Next() {
 			var host string
 			var cnt int
@@ -670,13 +670,13 @@ func (s *Server) getAnalysisSummary(c *gin.Context) {
 				topHosts = append(topHosts, map[string]interface{}{"host": host, "count": cnt})
 			}
 		}
-		result["top_hosts"] = topHosts
 	}
+	result["top_hosts"] = topHosts
 
+	topPatterns := []map[string]interface{}{}
 	patRows, err := s.db.Query("SELECT f.match_pattern, COUNT(*) as cnt FROM files f WHERE f.match_pattern != ''"+domainClause("f.domain")+" GROUP BY f.match_pattern ORDER BY cnt DESC LIMIT 10", domainArg(true)...)
 	if err == nil {
 		defer patRows.Close()
-		var topPatterns []map[string]interface{}
 		for patRows.Next() {
 			var pattern string
 			var cnt int
@@ -684,8 +684,8 @@ func (s *Server) getAnalysisSummary(c *gin.Context) {
 				topPatterns = append(topPatterns, map[string]interface{}{"pattern": pattern, "count": cnt})
 			}
 		}
-		result["top_patterns"] = topPatterns
 	}
+	result["top_patterns"] = topPatterns
 
 	c.JSON(http.StatusOK, result)
 }

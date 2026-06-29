@@ -27,6 +27,7 @@ func validateFlags() {
 		"-out": true, "-v": true, "-output": true, "--output": true,
 		// Config & state
 		"-config": true, "-resume": true, "-delta": true,
+		"-threads": true, "-operation-delay": true, "-dir-concurrency": true,
 		// Admin & web
 		"-check-admin": true, "-web": true, "-web-port": true, "-db": true,
 		// Meta
@@ -210,6 +211,9 @@ func applyScanConfigFromYAML(patterns *search.SearchPatterns) {
 	}
 	if s.Search.MaxDate != "" {
 		*maxDateFlag = s.Search.MaxDate
+	}
+	if s.Search.DirConcurrency > 0 {
+		*dirConcurrencyFlag = s.Search.DirConcurrency
 	}
 
 	// Stealth (YAML)

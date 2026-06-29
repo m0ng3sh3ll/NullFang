@@ -164,7 +164,22 @@ func configureSearch() *search.SearchConfig {
 	config.MaxCacheFileSize = *maxCacheFileSizeFlag
 	config.MaxDepth = *maxDepthFlag
 	config.Timeout = *timeoutFlag
-	config.MaxWorkers = *threadsFlag // Aplicar flag -threads ao MaxWorkers
+	// Cap workers at half threads or max 4 to avoid burst RST from rapid SMB ops
+	if *threadsFlag > 4 {
+		config.MaxWorkers = *threadsFlag / 2
+	} else if *threadsFlag > 1 {
+		config.MaxWorkers = *threadsFlag
+	} else {
+		config.MaxWorkers = 1
+	}
+	config.DirConcurrency = *dirConcurrencyFlag
+
+	// Warn if threads increased without reducing operation-delay
+	if *threadsFlag > 5 && *operationDelayMsFlag >= 300 {
+		fmt.Fprintf(os.Stderr, "\033[33m[!] WARNING: -threads %d at -operation-delay %dms increases concurrent SMB traffic.\n", *threadsFlag, *operationDelayMsFlag)
+		fmt.Fprintf(os.Stderr, "    High concurrency + high delay can cause WSAECONNRESET on older servers.\n")
+		fmt.Fprintf(os.Stderr, "    Recommended: -threads %d -operation-delay 100 for balanced speed/stability.\033[0m\n", *threadsFlag)
+	}
 
 	// Em modo no-copy, só habilita busca por conteúdo/regex se --no-copy-deep estiver ativo
 	if *noCopyFlag {
@@ -304,6 +319,7 @@ func configureCopy(chunkSize, bufferSize, batchSize int, batchTimeout time.Durat
 		config.FileExtensions = extensions
 	}
 
+	config.ScanMode = *modeFlag
 	config.BatchMode = *batchModeFlag
 	config.MiniBatchSize = *miniBatchSizeFlag
 

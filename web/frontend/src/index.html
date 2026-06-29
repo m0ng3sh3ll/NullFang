@@ -1,228 +1,365 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NullFang - Document Classification</title>
+    <title>NullFang</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.css" rel="stylesheet">
     <style>
         :root {
-            --primary-color: #2c3e50;
-            --secondary-color: #34495e;
-            --accent-color: #3498db;
-            --text-color: #2c3e50;
-            --background-color: #f5f6fa;
+            --bg:             #0d1117;
+            --bg-surface:     #161b22;
+            --bg-elevated:    #21262d;
+            --border:         #30363d;
+            --border-muted:   #21262d;
+            --text:           #e6edf3;
+            --text-muted:     #8b949e;
+            --text-subtle:    #6e7681;
+            --accent:         #58a6ff;
+            --accent-hover:   #79b8ff;
+            --success:        #3fb950;
+            --danger:         #f85149;
+            --warning:        #d29922;
+            /* legacy vars used in some places */
+            --primary-color:   #161b22;
+            --secondary-color: #21262d;
+            --accent-color:    #58a6ff;
+            --text-color:      #e6edf3;
+            --background-color:#0d1117;
         }
+
+        /* ── Base ── */
+        *, *::before, *::after { box-sizing: border-box; }
 
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: var(--background-color);
-            color: var(--text-color);
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            font-size: 0.9rem;
+            line-height: 1.5;
         }
 
+        /* ── Scrollbar ── */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-subtle); }
+
+        /* ── Navbar ── */
         .navbar {
-            background-color: var(--primary-color);
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            background-color: var(--bg-surface) !important;
+            border-bottom: 1px solid var(--border);
+            padding: 0 1.25rem;
+            min-height: 52px;
         }
 
         .navbar-brand {
-            color: white !important;
-            font-weight: bold;
+            color: var(--text) !important;
+            font-weight: 700;
+            font-size: 1rem;
+            letter-spacing: 0.02em;
+            padding: 0;
+            margin-right: 2rem;
         }
 
-        .card {
-            border: none;
-            border-radius: 10px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
-
-        .card-header {
-            background-color: var(--secondary-color);
-            color: white;
-            border-radius: 10px 10px 0 0 !important;
-        }
-
-        .btn-primary {
-            background-color: var(--accent-color);
-            border: none;
-        }
-
-        .btn-primary:hover {
-            background-color: #2980b9;
-        }
-
-        .document-list {
-            max-height: 600px;
-            overflow-y: auto;
-        }
-
-        .classification-panel {
-            position: sticky;
-            top: 20px;
-        }
-
-        .sensitivity-map {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-            margin: 1rem 0;
-        }
-
-        .sensitivity-item {
-            padding: 1rem;
-            border-radius: 0.5rem;
-            color: white;
-            text-align: center;
-        }
-
-        .sensitivity-color {
-            width: 2rem;
-            height: 2rem;
-            border-radius: 50%;
-        }
-
-        .sensitivity-info {
-            flex: 1;
-        }
-
-        .sensitivity-actions {
-            display: flex;
-            gap: 0.5rem;
-        }
-
-        .table-responsive {
-            margin-top: 1rem;
-        }
-
-        .badge {
-            font-size: 0.875rem;
-            padding: 0.5em 0.75em;
-        }
-
-        .btn-group {
-            margin-bottom: 1rem;
-        }
-
-        .modal-dialog {
-            max-width: 600px;
-        }
-
-        .form-check {
-            margin-top: 0.5rem;
-        }
-
-        .priority-badge {
-            font-size: 0.75rem;
-            padding: 0.25em 0.5em;
-            border-radius: 0.25rem;
-        }
-
-        .priority-high {
-            background-color: #dc3545;
-            color: white;
-        }
-
-        .priority-medium {
-            background-color: #ffc107;
-            color: black;
-        }
-
-        .priority-low {
-            background-color: #28a745;
-            color: white;
+        .navbar-brand span {
+            color: var(--danger);
         }
 
         .nav-link {
-            color: white !important;
-            opacity: 0.8;
-            transition: opacity 0.2s;
+            color: var(--text-muted) !important;
+            font-size: 0.875rem;
+            padding: 0.85rem 0.75rem !important;
+            border-bottom: 2px solid transparent;
+            transition: color 0.15s, border-color 0.15s;
         }
 
-        .nav-link:hover {
-            opacity: 1;
-        }
+        .nav-link:hover { color: var(--text) !important; }
 
         .nav-link.active {
-            opacity: 1;
-            font-weight: 500;
+            color: var(--text) !important;
+            border-bottom-color: var(--accent);
         }
 
-        .table th {
-            background-color: var(--secondary-color);
-            color: white;
-        }
-
-        .modal-content {
-            border-radius: 10px;
-            border: none;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        }
-
-        .modal-header {
-            background-color: var(--secondary-color);
-            color: white;
-            border-radius: 10px 10px 0 0;
-        }
-
-        .btn-close {
-            filter: brightness(0) invert(1);
-        }
-
-        /* Estilos para o seletor de domínio */
         #domainSelector {
-            background-color: var(--secondary-color) !important;
-            color: white !important;
-            border: 1px solid #6c757d !important;
-            border-radius: 5px;
-            padding: 0.375rem 0.75rem;
-            font-size: 0.875rem;
-            transition: all 0.2s ease-in-out;
+            background-color: var(--bg-elevated) !important;
+            color: var(--text) !important;
+            border: 1px solid var(--border) !important;
+            border-radius: 6px;
+            padding: 0.3rem 0.75rem;
+            font-size: 0.8rem;
+            min-width: 180px;
+            transition: border-color 0.15s;
         }
 
-        #domainSelector:hover {
-            background-color: #495057 !important;
-            border-color: #adb5bd !important;
-        }
-
+        #domainSelector:hover,
         #domainSelector:focus {
-            background-color: var(--secondary-color) !important;
-            border-color: var(--accent-color) !important;
-            box-shadow: 0 0 0 0.2rem rgba(52, 152, 219, 0.25);
+            border-color: var(--accent) !important;
+            outline: none;
+            box-shadow: 0 0 0 2px rgba(88,166,255,0.15);
         }
 
         #domainSelector option {
-            background-color: var(--secondary-color);
-            color: white;
+            background-color: var(--bg-elevated);
+            color: var(--text);
         }
 
-        .navbar-nav .nav-item {
-            display: flex;
-            align-items: center;
+        /* ── Cards ── */
+        .card {
+            background-color: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            box-shadow: none;
+            margin-bottom: 16px;
+        }
+
+        .card-header {
+            background-color: var(--bg-elevated);
+            color: var(--text);
+            border-bottom: 1px solid var(--border);
+            border-radius: 8px 8px 0 0 !important;
+            padding: 0.6rem 1rem;
+            font-size: 0.82rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .card-body { padding: 1rem; }
+
+        /* ── Tables ── */
+        .table {
+            color: var(--text);
+            border-color: var(--border-muted);
+            margin-bottom: 0;
+        }
+
+        .table th {
+            background-color: var(--bg-elevated);
+            color: var(--text-muted);
+            border-color: var(--border);
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            padding: 0.6rem 0.75rem;
+            white-space: nowrap;
+        }
+
+        .table td {
+            border-color: var(--border-muted);
+            padding: 0.5rem 0.75rem;
+            vertical-align: middle;
+        }
+
+        .table-sm td, .table-sm th { padding: 0.35rem 0.75rem; }
+
+        .table-hover tbody tr:hover {
+            background-color: var(--bg-elevated);
+            color: var(--text);
+        }
+
+        .table-striped tbody tr:nth-of-type(odd) {
+            background-color: rgba(255,255,255,0.02);
+        }
+
+        /* ── Forms ── */
+        .form-control,
+        .form-select {
+            background-color: var(--bg-elevated);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 6px;
+            font-size: 0.875rem;
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+
+        .form-control:focus,
+        .form-select:focus {
+            background-color: var(--bg-elevated);
+            border-color: var(--accent);
+            color: var(--text);
+            box-shadow: 0 0 0 2px rgba(88,166,255,0.15);
+        }
+
+        .form-control::placeholder { color: var(--text-subtle); }
+
+        .form-label {
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            margin-bottom: 0.3rem;
+        }
+
+        .form-check-input {
+            background-color: var(--bg-elevated);
+            border-color: var(--border);
+        }
+
+        .form-check-input:checked {
+            background-color: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .form-check-label { color: var(--text); }
+        .form-text { color: var(--text-subtle); }
+
+        /* ── Buttons ── */
+        .btn-primary {
+            background-color: var(--accent);
+            border-color: var(--accent);
+            color: #0d1117;
+            font-weight: 600;
+        }
+
+        .btn-primary:hover {
+            background-color: var(--accent-hover);
+            border-color: var(--accent-hover);
+            color: #0d1117;
+        }
+
+        .btn-secondary {
+            background-color: var(--bg-elevated);
+            border-color: var(--border);
+            color: var(--text);
+        }
+
+        .btn-secondary:hover {
+            background-color: var(--border);
+            border-color: var(--border);
+            color: var(--text);
+        }
+
+        .btn-success {
+            background-color: var(--success);
+            border-color: var(--success);
+            color: #0d1117;
+            font-weight: 600;
+        }
+
+        .btn-danger {
+            background-color: var(--danger);
+            border-color: var(--danger);
+        }
+
+        .btn-outline-secondary {
+            border-color: var(--border);
+            color: var(--text-muted);
+        }
+
+        .btn-outline-secondary:hover {
+            background-color: var(--bg-elevated);
+            border-color: var(--border);
+            color: var(--text);
+        }
+
+        .btn-outline-primary {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .btn-outline-primary:hover {
+            background-color: rgba(88,166,255,0.1);
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .btn-outline-danger {
+            border-color: var(--danger);
+            color: var(--danger);
+        }
+
+        .btn-outline-danger:hover {
+            background-color: rgba(248,81,73,0.1);
+            color: var(--danger);
+        }
+
+        /* ── Modals ── */
+        .modal-content {
+            background-color: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text);
+        }
+
+        .modal-header {
+            background-color: var(--bg-elevated);
+            border-bottom: 1px solid var(--border);
+            border-radius: 10px 10px 0 0;
+            color: var(--text);
+            padding: 0.875rem 1.25rem;
+        }
+
+        .modal-footer {
+            background-color: var(--bg-elevated);
+            border-top: 1px solid var(--border);
+            border-radius: 0 0 10px 10px;
+        }
+
+        .btn-close { filter: invert(1) grayscale(1) brightness(2); }
+
+        /* ── Badges ── */
+        .badge {
+            font-size: 0.75rem;
+            font-weight: 500;
+            padding: 0.3em 0.65em;
+            border-radius: 5px;
+        }
+
+        /* ── Text utilities override ── */
+        .text-muted { color: var(--text-muted) !important; }
+        .text-dark   { color: var(--text) !important; }
+
+        /* ── Misc ── */
+        hr { border-color: var(--border); opacity: 1; }
+
+        .table-responsive { margin-top: 0; }
+
+        .priority-badge {
+            font-size: 0.72rem;
+            padding: 0.2em 0.5em;
+            border-radius: 4px;
+        }
+
+        .priority-high   { background-color: var(--danger); color: #fff; }
+        .priority-medium { background-color: var(--warning); color: #0d1117; }
+        .priority-low    { background-color: var(--success); color: #0d1117; }
+
+        /* ── Vis.js dark overrides ── */
+        .vis-network { background-color: var(--bg) !important; }
+        .vis-tooltip {
+            background-color: var(--bg-elevated) !important;
+            border: 1px solid var(--border) !important;
+            color: var(--text) !important;
+            border-radius: 6px !important;
+            font-size: 0.8rem !important;
+        }
+
+        /* ── Stat cards ── */
+        .stat-card { border-left: 3px solid var(--accent); }
+        .stat-card .display-6 { font-size: 2rem; }
+
+        /* ── Input group dark ── */
+        .input-group-text {
+            background-color: var(--bg-elevated);
+            border-color: var(--border);
+            color: var(--text-muted);
         }
     </style>
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <nav class="navbar navbar-expand-lg">
         <div class="container-fluid">
-            <a class="navbar-brand" href="/">NullFang</a>
-            
-            <!-- Seletor de Domínio -->
-            <div class="navbar-nav me-auto">
-                <div class="nav-item dropdown">
-                    <select class="form-select form-select-sm" id="domainSelector" style="background-color: var(--secondary-color); color: white; border: 1px solid #6c757d; min-width: 200px;">
-                        <option value="">Loading domains...</option>
-                    </select>
-                </div>
-            </div>
-            
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                <span class="navbar-toggler-icon"></span>
+            <a class="navbar-brand" href="#" onclick="navigate('/triage')">Null<span>Fang</span></a>
+
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"
+                style="border-color:var(--border);">
+                <span class="navbar-toggler-icon" style="filter:invert(1);"></span>
             </button>
+
             <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav me-auto">
+                <ul class="navbar-nav me-auto" id="mainNav">
                     <li class="nav-item">
                         <a class="nav-link" href="#" onclick="navigate('/triage')">Triage</a>
                     </li>
@@ -236,29 +373,32 @@
                         <a class="nav-link" href="#" onclick="navigate('/analysis')">Analysis</a>
                     </li>
                 </ul>
+
+                <div class="navbar-nav">
+                    <select class="form-select form-select-sm" id="domainSelector"
+                        onchange="updateSelectedDomain(this.value)">
+                        <option value="">All domains</option>
+                    </select>
+                </div>
             </div>
         </div>
     </nav>
 
-    <div class="container mt-4">
-        <div id="mainContent">
-            <!-- O conteúdo será carregado dinamicamente aqui -->
-        </div>
-    </div>
+    <div id="mainContent"></div>
 
-    <!-- Modal de Classificação -->
-    <div class="modal fade" id="classificationModal" tabindex="-1" aria-labelledby="classificationModalLabel" aria-hidden="true">
+    <!-- Classify modal -->
+    <div class="modal fade" id="classificationModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog">
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title" id="classificationModalLabel">Classify Document</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
                     <div class="mb-3">
                         <label for="classificationSelect" class="form-label">Classification</label>
                         <select class="form-select" id="classificationSelect" required>
-                            <option value="">Select a classification...</option>
+                            <option value="">Select a classification…</option>
                         </select>
                     </div>
                     <div class="mb-3">
@@ -279,4 +419,4 @@
     <script src="router.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </body>
-</html> 
+</html>

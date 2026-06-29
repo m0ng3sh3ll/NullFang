@@ -56,6 +56,11 @@ func main() {
 	}
 	defer db.Close()
 
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "NullFang "+VERSION+" — SMB share intelligence & file exfiltration\n")
+		fmt.Fprintf(os.Stderr, "Usage: nullfang [flags] -H <host> -u <user> -p <pass>\n")
+		fmt.Fprintf(os.Stderr, "Run 'nullfang -help' for complete options.\n")
+	}
 	flag.Parse()
 
 	// Apply derived modes before any other logic reads the internal vars.

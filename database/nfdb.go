@@ -50,12 +50,17 @@ func InitDB(path string) (*sql.DB, error) {
 		leet_speak BOOLEAN,
 		search_param_type TEXT,
 		search_param_value TEXT,
-		parent_id INTEGER
+		parent_id INTEGER,
+		scan_mode TEXT DEFAULT 'exfil'
 	);
 	`)
 	if err != nil {
-		fmt.Printf("[DB-ERROR] Failed to create table: %v\n", err)
+		fmt.Printf("[DB-ERROR] Failed to create files table: %v\n", err)
 		return nil, err
+	}
+	// Migration: add scan_mode column if it doesn't exist (legacy DBs)
+	if merr := MigrateAddScanMode(db); merr != nil {
+		fmt.Printf("[DB-ERROR] Migration failed: %v\n", merr)
 	}
 	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS low_hanging_fruit (
@@ -346,16 +351,20 @@ func InsertFile(
 	leetSpeak bool,
 	searchParamType, searchParamValue string,
 	parentID *int,
+	scanMode string,
 ) error {
+	if scanMode == "" {
+		scanMode = "exfil"
+	}
 	stmt, err := db.Prepare(`
 	INSERT INTO files(
-		path, host, share, domain, user, size, mod_time, file_type, match_pattern, match_type, hash, local_path, found_time, large_file, size_formatted, leet_speak, search_param_type, search_param_value, parent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		path, host, share, domain, user, size, mod_time, file_type, match_pattern, match_type, hash, local_path, found_time, large_file, size_formatted, leet_speak, search_param_type, search_param_value, parent_id, scan_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		fmt.Printf("[DB-ERROR] Prepare failed: %v\n", err)
 		return err
 	}
 	defer stmt.Close()
-	_, err = stmt.Exec(path, host, share, domain, user, size, modTime, fileType, matchPattern, matchType, hash, localPath, time.Now(), largeFile, sizeFormatted, leetSpeak, searchParamType, searchParamValue, parentID)
+	_, err = stmt.Exec(path, host, share, domain, user, size, modTime, fileType, matchPattern, matchType, hash, localPath, time.Now(), largeFile, sizeFormatted, leetSpeak, searchParamType, searchParamValue, parentID, scanMode)
 	if err != nil {
 		fmt.Printf("[DB-ERROR] Exec failed: %v\n", err)
 		return err
@@ -392,15 +401,19 @@ func InsertFileReturnID(
 	leetSpeak bool,
 	searchParamType, searchParamValue string,
 	parentID *int,
+	scanMode string,
 ) (int, error) {
+	if scanMode == "" {
+		scanMode = "exfil"
+	}
 	stmt, err := db.Prepare(`
 	INSERT INTO files(
-		path, host, share, domain, user, size, mod_time, file_type, match_pattern, match_type, hash, local_path, found_time, large_file, size_formatted, leet_speak, search_param_type, search_param_value, parent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		path, host, share, domain, user, size, mod_time, file_type, match_pattern, match_type, hash, local_path, found_time, large_file, size_formatted, leet_speak, search_param_type, search_param_value, parent_id, scan_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return 0, err
 	}
 	defer stmt.Close()
-	res, err := stmt.Exec(path, host, share, domain, user, size, modTime, fileType, matchPattern, matchType, hash, localPath, time.Now(), largeFile, sizeFormatted, leetSpeak, searchParamType, searchParamValue, parentID)
+	res, err := stmt.Exec(path, host, share, domain, user, size, modTime, fileType, matchPattern, matchType, hash, localPath, time.Now(), largeFile, sizeFormatted, leetSpeak, searchParamType, searchParamValue, parentID, scanMode)
 	if err != nil {
 		return 0, err
 	}

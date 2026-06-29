@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha512"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"sync"
@@ -467,6 +468,18 @@ func (conn *conn) makeRequestResponse(req Packet, tc *treeConn, ctx context.Cont
 	}
 
 	conn.outstandingRequests.set(msgId, rr)
+
+	if debug {
+		cmdHex := hdr.Command
+		maxDump := 512
+		if len(pkt) > maxDump {
+			logger.Printf("[SMB-TX] cmd=0x%04X mid=%d size=%d (dump truncated to %d)", cmdHex, msgId, len(pkt), maxDump)
+			logger.Printf("\n%s", hex.Dump(pkt[:maxDump]))
+		} else {
+			logger.Printf("[SMB-TX] cmd=0x%04X mid=%d size=%d", cmdHex, msgId, len(pkt))
+			logger.Printf("\n%s", hex.Dump(pkt))
+		}
+	}
 
 	return rr, nil
 }

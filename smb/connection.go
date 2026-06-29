@@ -236,13 +236,11 @@ func (c *SMBConnection) Connect() error {
 		}
 		if c.Config.Dialect != 0 {
 			d.Negotiator.SpecifiedDialect = c.Config.Dialect
-		} else {
-			d.Negotiator.SpecifiedDialect = 0x0311
 		}
 		if c.Config.Signing != nil {
 			d.Negotiator.RequireMessageSigning = *c.Config.Signing
 		} else {
-			d.Negotiator.RequireMessageSigning = true
+			d.Negotiator.RequireMessageSigning = false
 		}
 	} else {
 		// Default to username/password authentication
@@ -256,13 +254,11 @@ func (c *SMBConnection) Connect() error {
 		}
 		if c.Config.Dialect != 0 {
 			d.Negotiator.SpecifiedDialect = c.Config.Dialect
-		} else {
-			d.Negotiator.SpecifiedDialect = 0x0311
 		}
 		if c.Config.Signing != nil {
 			d.Negotiator.RequireMessageSigning = *c.Config.Signing
 		} else {
-			d.Negotiator.RequireMessageSigning = true
+			d.Negotiator.RequireMessageSigning = false
 		}
 	}
 
