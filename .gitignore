@@ -8,3 +8,12 @@ Extras/
 /nfpath/nfpath
 *.db
 Claude.md
+
+# compiled binaries (release/scratch), not tracked
+nfdb/nfdb
+nfdb/nfdb_cli
+nullfang_*
+dist/
+checkpoints/
+NullFang_output/
+history/

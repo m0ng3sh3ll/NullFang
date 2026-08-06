@@ -308,6 +308,26 @@ func (c *Client) Authenticate(cmsg []byte) (amsg []byte, err error) {
 		}
 
 		c.session = session
+	} else {
+		// Anonymous/NULL session (no user, password, or hash).
+		// Without this the signing MIC path in sessionSetup panics on a nil
+		// *Session. Windows derives keys from an empty session key for the
+		// null session, so we mirror that here.
+		anon := new(Session)
+		anon.isClientSide = true
+		anon.user = c.User
+		anon.negotiateFlags = flags
+		anon.infoMap = info.InfoMap
+		anon.exportedSessionKey = make([]byte, 16)
+		anon.clientSigningKey = signKey(flags, anon.exportedSessionKey, true)
+		anon.serverSigningKey = signKey(flags, anon.exportedSessionKey, false)
+		if k := sealKey(flags, anon.exportedSessionKey, true); k != nil {
+			anon.clientHandle, _ = rc4.NewCipher(k)
+		}
+		if k := sealKey(flags, anon.exportedSessionKey, false); k != nil {
+			anon.serverHandle, _ = rc4.NewCipher(k)
+		}
+		c.session = anon
 	}
 
 	return amsg, nil

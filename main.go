@@ -243,7 +243,7 @@ func main() {
 
 	if *summaryFlag {
 		if *domainFlag == "" {
-			fmt.Println("\n[ERROR] For use -summary, inform the domain with -d <domain>\n")
+			fmt.Println("\n[ERROR] For use -summary, inform the domain with -d <domain>")
 			os.Exit(1)
 		}
 
@@ -766,7 +766,7 @@ func main() {
 		processed := checkpointInstance.GetProcessedHosts()
 		foundFiles := checkpointInstance.GetFoundFilesCount()
 		if len(processed) == 0 && len(failed) == totalHosts && foundFiles == 0 {
-			fmt.Println("\nNo valid SMB service detected. All targets failed to connect or SMB service is unreachable\n")
+			fmt.Println("\nNo valid SMB service detected. All targets failed to connect or SMB service is unreachable")
 			os.Exit(1)
 		}
 	}
