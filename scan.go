@@ -398,7 +398,7 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 	var searchErr error
 
 	// Context com timeout para o host inteiro
-	hostCtx, hostCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	hostCtx, hostCancel := context.WithTimeout(context.Background(), *timeoutFlag)
 	defer hostCancel()
 
 	// Canal para sinalizar quando a busca terminar
@@ -480,6 +480,11 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 			}
 			seen[key] = struct{}{}
 
+			fmt.Printf("[MATCH] \\\\%s\\%s\\%s  [%s: %s]  (%s)\n",
+				host, result.ShareName, result.FilePath,
+				result.MatchType, result.MatchValue,
+				formatSize(result.FileSize))
+
 			_, err := copyutil.CopySingleMatch(ctx, db, simpleShares, result, copyConfig, host, throttler)
 			if err != nil {
 				logger.Error("[-] Failed to copy %s: %v", result.FilePath, err)
@@ -502,8 +507,8 @@ func processHostWithMessages(host string, searchConfig *search.SearchConfig, cop
 		}
 	case <-hostCtx.Done():
 		// Host timeout - encerrar busca
-		fmt.Printf("⏰ Host %s timeout after 5 minutes. Skipping to next host.\n", host)
-		searchErr = fmt.Errorf("host %s timeout after 5 minutes", host)
+		fmt.Printf("⏰ Host %s timeout after %s. Skipping to next host.\n", host, timeoutFlag.String())
+		searchErr = fmt.Errorf("host %s timeout after %s", host, timeoutFlag.String())
 		// Fechar canal usando sync.Once
 		closeResultsChan()
 	}

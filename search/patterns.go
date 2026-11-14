@@ -121,9 +121,6 @@ type ScanSettings struct {
 		// MaxDate: only process files modified on or before this date (YYYY-MM-DD). Default: "".
 		MaxDate string `yaml:"max_date"`
 
-		// DirConcurrency: max concurrent directory opens during recursive scan. Default: 4.
-		// Higher values speed up deep trees but increase concurrent SMB ops.
-		DirConcurrency int `yaml:"dir_concurrency"`
 	} `yaml:"search"`
 
 	Stealth struct {
@@ -145,9 +142,6 @@ type ScanSettings struct {
 		// Randomized order is the default (stealth-friendly).
 		DisableRandomize bool `yaml:"disable_randomize"`
 
-		// DisableCanarySkip: set true to process honeypot/canary files. Default: false.
-		// By default canary files are skipped to avoid triggering traps.
-		DisableCanarySkip bool `yaml:"disable_canary_skip"`
 	} `yaml:"stealth"`
 
 	Network struct {

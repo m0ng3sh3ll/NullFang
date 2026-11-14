@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	VERSION = "v1.5.5"
+	VERSION = "v1.5.6"
 	AUTHOR  = "M0ng3Sh3ll"
 )
 
@@ -88,7 +88,7 @@ var (
 	// or automatically by --stealth. See config/nullfang.yaml for full docs.
 
 	threadsFlag          = flag.Int("threads", 5, "Number of concurrent hosts (default 5)")
-	timeoutFlag          = func() *time.Duration { v := 5 * time.Minute; return &v }()
+	timeoutFlag          = flag.Duration("timeout", 5*time.Minute, "Per-host scan timeout (e.g. 10m, 30m, 1h)")
 	copyTimeoutFlag      = func() *time.Duration { v := 2 * time.Minute; return &v }()
 	authTimeoutFlag      = func() *time.Duration { v := 30 * time.Second; return &v }()
 	maxConnsPerHostFlag  = func() *int           { v := 5; return &v }()
@@ -117,13 +117,11 @@ var (
 	jitterFlag           = func() *int           { v := 0; return &v }()
 	preserveAtimeFlag    = func() *bool          { v := false; return &v }()
 	noRandomizeFlag      = func() *bool          { v := false; return &v }()
-	noSkipCanaryFlag     = func() *bool          { v := false; return &v }()
 	noCopyFlag           = func() *bool          { v := false; return &v }()
 	noCopyDeepFlag       = func() *bool          { v := false; return &v }()
 	machineFlag          = func() *bool          { v := false; return &v }()
 	quietFlag            = func() *bool          { v := false; return &v }()
 	operationDelayMsFlag    = flag.Int("operation-delay", 300, "Per-entry delay in ms between SMB ops (0=disabled)")
-	dirConcurrencyFlag      = flag.Int("dir-concurrency", 4, "Max concurrent directory opens (default 4)")
 	lockoutThresholdFlag    = flag.Int("lockout-threshold", 1, "Halt scan after N auth failures to prevent account lockout (0 = disabled)")
 	hashDedupFlag           = func() *bool { v := true; return &v }() // enabled by default
 )

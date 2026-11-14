@@ -108,16 +108,8 @@ type SearchConfig struct {
 	// Delay entre operações SMB para evitar sobrecarga do servidor
 	OperationDelay time.Duration
 
-	// DirConcurrency: max concurrent directory opens (semaphore).
-	// Higher values increase parallelism in deep trees.
-	DirConcurrency int
-
 	// Randomize entry/share iteration order (stealth: avoids sequential access pattern)
 	RandomizeOrder bool
-
-	// Skip files that look like honeypot/canary traps
-	SkipCanaryFiles bool
-	CanaryPatterns  []string
 
 	// Preserve original file access time (atime) after content scan
 	PreserveAtime bool
@@ -251,10 +243,7 @@ func NewSearchConfig() *SearchConfig {
 		MaxCacheFileSize:        1024 * 1024,            // 1MB default
 		FilterLargeFiles:        false,                  // Default to disabled
 		OperationDelay:          150 * time.Millisecond, // Base para humanBrowseDelay entre diretórios
-		DirConcurrency:          4,                      // Max concurrent directory opens
 		RandomizeOrder:          true,                   // Randomize share/dir order by default (stealth)
-		SkipCanaryFiles:         true,                   // Skip honeypot/canary files by default
-		CanaryPatterns:          defaultCanaryPatterns(),
 		PreserveAtime:           false,                  // Opt-in: Chtimes generates extra server events
 		DeltaMode:               false,
 		KnownFiles:              nil,
@@ -320,7 +309,7 @@ func SearchShare(fs *smb2.Share, shareName string, startPath string, config *Sea
 	defer cancel()
 
 	wp := NewWorkerPool(config.MaxWorkers, results)
-	dc := NewDirCache(config.DirCacheTTL, config.DirConcurrency)
+	dc := NewDirCache(config.DirCacheTTL)
 	wp.Start(ctx, fileContentCache)
 
 	// --- INÍCIO DO KEEP-ALIVE ---
@@ -515,7 +504,6 @@ func joinSMBPath(elem ...string) string {
 type DirCache struct {
 	cache sync.Map
 	ttl   time.Duration
-	sem   chan struct{} // semaphore: max concurrent directory opens (human-like pacing)
 }
 
 type CacheEntry struct {
@@ -523,13 +511,9 @@ type CacheEntry struct {
 	expiry  time.Time
 }
 
-func NewDirCache(ttl time.Duration, maxConcurrent int) *DirCache {
-	if maxConcurrent < 1 {
-		maxConcurrent = 1
-	}
+func NewDirCache(ttl time.Duration) *DirCache {
 	return &DirCache{
 		ttl: ttl,
-		sem: make(chan struct{}, maxConcurrent),
 	}
 }
 
@@ -1007,8 +991,7 @@ func sendResultSafely(ctx context.Context, results chan<- *SearchResult, result 
 
 func processEntries(ctx context.Context, fs *smb2.Share, shareName, dirPath string, entries []os.FileInfo, config *SearchConfig, results chan<- *SearchResult, depth int, wp *WorkerPool, dc *DirCache) error {
 	logger.Debug("[DEBUG] processEntries: %d entradas em %s", len(entries), dirPath)
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(entries))
+	var firstErr error
 
 EntryLoop:
 	for _, entry := range entries {
@@ -1059,31 +1042,17 @@ EntryLoop:
 
 			// Delay humano antes de entrar em subdiretório: simula o tempo que
 			// um humano leva para "olhar" a listagem antes de clicar em outra pasta.
-			// Feito no loop (não na goroutine) para escalonar os acessos em vez de
-			// disparar todos simultâneamente — padrão de burst é facilmente detectável por XDR.
 			select {
 			case <-ctx.Done():
 				break EntryLoop
 			case <-time.After(humanBrowseDelay(config.OperationDelay)):
 			}
-			wg.Add(1)
-			dc.sem <- struct{}{} // acquire: block if max concurrent dir opens reached
-			go func(path string) {
-				defer wg.Done()
-				defer func() { <-dc.sem }() // release
-				logger.Debug("[DEBUG] Recursion in directory: %s", path)
-				if err := searchDirectoryWithContext(ctx, fs, shareName, path, config, results, depth+1, wp, dc); err != nil {
-					errChan <- err
-				}
-			}(entryPath)
+			logger.Debug("[DEBUG] Recursion in directory: %s", entryPath)
+			if err := searchDirectoryWithContext(ctx, fs, shareName, entryPath, config, results, depth+1, wp, dc); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		} else {
 			logger.Debug("[DEBUG] Sending job to worker pool: %s", entryPath)
-
-			// Canary detection: skip files that look like honeypot traps
-			if config.SkipCanaryFiles && isCanaryFile(entry.Name(), entry.Size(), config.CanaryPatterns) {
-				logger.Warning("[!] Canary/honeyfile detected, skipping: %s", entryPath)
-				continue
-			}
 
 			// Delta mode: skip files unchanged since last scan
 			if config.DeltaMode && config.KnownFiles != nil {
@@ -1193,23 +1162,10 @@ EntryLoop:
 		}
 	}
 
-	wg.Wait()
-	// NÃO feche o canal errChan aqui!
-	var firstErr error
-	for {
-		select {
-		case err := <-errChan:
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-		default:
-			// Canal vazio, pode sair
-			return firstErr
-		}
-	}
+	return firstErr
 }
 
-// SearchMultipleShares searches multiple shares concurrently (Legacy: assumes root path)
+// SearchMultipleShares searches multiple shares sequentially (Legacy: assumes root path)
 func SearchMultipleShares(fs map[string]*smb2.Share, config *SearchConfig, fileContentCache *scanner.FileContentCache) ([]*SearchResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
 	defer cancel()
@@ -1219,8 +1175,7 @@ func SearchMultipleShares(fs map[string]*smb2.Share, config *SearchConfig, fileC
 
 	wp.Start(ctx, fileContentCache)
 
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(fs))
+	var firstErr error
 
 	for shareName, share := range fs {
 		if config.SkipSpecialShares && isSpecialShare(shareName, config.ExcludedShares) {
@@ -1228,34 +1183,26 @@ func SearchMultipleShares(fs map[string]*smb2.Share, config *SearchConfig, fileC
 			continue
 		}
 
-		wg.Add(1)
-		go func(name string, fs *smb2.Share) {
-			defer wg.Done()
-
-			err := SearchShare(fs, name, ".", config, resultsChan, fileContentCache)
-			if err != nil {
-				if config.Verbose {
-					logger.Debug("Failed to search share %s: %v", name, err)
-				}
-				errChan <- err
+		err := SearchShare(share, shareName, ".", config, resultsChan, fileContentCache)
+		if err != nil {
+			if config.Verbose {
+				logger.Debug("Failed to search share %s: %v", shareName, err)
 			}
-		}(shareName, share)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
 
-	// Fechar o canal de resultados só depois de todas as goroutines terminarem
-	go func() {
-		wg.Wait()
-		logger.Debug("[DEBUG] Closing results and error channels in SearchMultipleShares")
-		close(resultsChan)
-		close(errChan)
-	}()
+	logger.Debug("[DEBUG] Closing results channel in SearchMultipleShares")
+	close(resultsChan)
 
 	var results []*SearchResult
 	for result := range resultsChan {
 		results = append(results, result)
 	}
 
-	return results, aggregateErrors(errChan)
+	return results, firstErr
 }
 
 // Versão que acumula mensagens no slice messages (Legacy: assumes root path)
@@ -1268,8 +1215,7 @@ func SearchMultipleSharesWithMessages(fs map[string]*smb2.Share, config *SearchC
 
 	wp.Start(ctx, fileContentCache)
 
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(fs))
+	var firstErr error
 
 	for shareName, share := range fs {
 		if config.SkipSpecialShares && isSpecialShare(shareName, config.ExcludedShares) {
@@ -1277,36 +1223,28 @@ func SearchMultipleSharesWithMessages(fs map[string]*smb2.Share, config *SearchC
 			continue
 		}
 
-		wg.Add(1)
-		go func(name string, fs *smb2.Share) {
-			defer wg.Done()
-
-			err := SearchShare(fs, name, ".", config, resultsChan, fileContentCache)
-			if err != nil {
-				if config.Verbose {
-					logger.Debug("Failed to search share %s: %v", name, err)
-				} else if messages != nil {
-					*messages = append(*messages, fmt.Sprintf("[-] Failed to search share %s: %v", name, err))
-				}
-				errChan <- err
+		err := SearchShare(share, shareName, ".", config, resultsChan, fileContentCache)
+		if err != nil {
+			if config.Verbose {
+				logger.Debug("Failed to search share %s: %v", shareName, err)
+			} else if messages != nil {
+				*messages = append(*messages, fmt.Sprintf("[-] Failed to search share %s: %v", shareName, err))
 			}
-		}(shareName, share)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
 
-	// Fechar o canal de resultados só depois de todas as goroutines terminarem
-	go func() {
-		wg.Wait()
-		logger.Debug("[DEBUG] Closing results and error channels in SearchMultipleSharesWithMessages")
-		close(resultsChan)
-		close(errChan)
-	}()
+	logger.Debug("[DEBUG] Closing results channel in SearchMultipleSharesWithMessages")
+	close(resultsChan)
 
 	var results []*SearchResult
 	for result := range resultsChan {
 		results = append(results, result)
 	}
 
-	return results, aggregateErrors(errChan)
+	return results, firstErr
 }
 
 // LoadPatternsFromFile loads search patterns from a file
@@ -1918,42 +1856,6 @@ func isTransportError(err error) bool {
 		strings.Contains(s, "forcibly closed")
 }
 
-// defaultCanaryPatterns returns well-known honeypot/canary file names.
-// These filenames are suspiciously attractive and commonly used as honeyfiles.
-func defaultCanaryPatterns() []string {
-	return []string{
-		"passwords.docx", "passwords.xlsx", "passwords.txt", "passwords.csv",
-		"credentials.docx", "credentials.xlsx", "credentials.txt",
-		"network passwords.txt", "network_credentials.txt",
-		"secret.txt", "secrets.txt", "secret.docx",
-		"honeytoken", "honeybadger", "honeypot",
-		"canary", "canarytoken",
-		"api_keys.txt", "api_keys.docx",
-		"private_keys.txt", "ssh_keys.txt",
-	}
-}
-
-// isCanaryFile returns true if the file appears to be a honeypot/canary trap.
-// Checks: known canary filenames OR (suspiciously attractive keyword + tiny file).
-// Tiny file heuristic: real credential files are usually > 512 bytes.
-func isCanaryFile(name string, size int64, patterns []string) bool {
-	nameLower := strings.ToLower(name)
-	for _, p := range patterns {
-		if strings.EqualFold(nameLower, p) {
-			return true
-		}
-	}
-	// Heuristic: exact keyword match in name AND tiny size
-	if size > 0 && size < 512 {
-		for _, kw := range []string{"password", "credential", "secret", "api_key", "private_key", "passlist"} {
-			if strings.Contains(nameLower, kw) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // isDFSError returns true if the error indicates a DFS referral is needed.
 func isDFSError(err error) bool {
 	if err == nil {
@@ -1998,11 +1900,8 @@ func SearchMultipleSharesStream(fs map[string]*MountedShare, config *SearchConfi
 
 	wp.Start(ctx, fileContentCache)
 
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(fs))
 	timeoutCount := 0
-	var errChanMutex sync.Mutex
-	errChanClosed := false
+	var firstErr error
 
 	// Build ordered share list; randomize access order for stealth
 	shareKeys := make([]string, 0, len(fs))
@@ -2020,64 +1919,26 @@ func SearchMultipleSharesStream(fs map[string]*MountedShare, config *SearchConfi
 			continue
 		}
 
-		wg.Add(1)
-		go func(name string, ms *MountedShare) {
-			defer wg.Done()
-
-			err := SearchShare(ms.Share, name, ms.StartPath, config, resultsChan, fileContentCache)
-
-			if err != nil {
-				if config.Verbose {
-					logger.Debug("Failed to search share %s: %v", name, err)
-				}
-				// Contar timeouts consecutivos
-				if strings.Contains(err.Error(), "directory . consistently timing out") {
-					timeoutCount++
-				}
-
-				// Proteger envio no canal
-				errChanMutex.Lock()
-				if !errChanClosed {
-					select {
-					case errChan <- err:
-					default:
-						// Canal cheio, ignorar erro
-					}
-				}
-				errChanMutex.Unlock()
+		err := SearchShare(shareInfo.Share, shareName, shareInfo.StartPath, config, resultsChan, fileContentCache)
+		if err != nil {
+			if config.Verbose {
+				logger.Debug("Failed to search share %s: %v", shareName, err)
 			}
-		}(shareName, shareInfo)
+			// Contar timeouts consecutivos
+			if strings.Contains(err.Error(), "directory . consistently timing out") {
+				timeoutCount++
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
-
-	// Aguardar com timeout para evitar travamento
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		logger.Debug("[DEBUG] All shares finished, closing error channel")
-	case <-time.After(5 * time.Minute):
-		logger.Debug("[DEBUG] Timeout waiting for shares to finish, forcing exit")
-	}
-
-	// Fechar errChan exatamente uma vez
-	errChanMutex.Lock()
-	if !errChanClosed {
-		close(errChan)
-		errChanClosed = true
-	}
-	errChanMutex.Unlock()
 
 	// NÃO fechar resultsChan aqui - ele é fechado pelo chamador
 
-	// Se há muitos timeouts, retornar erro simples
 	if timeoutCount >= 3 {
 		return fmt.Errorf("multiple shares timing out on host")
 	}
 
-	// aggregateErrorsWithTimeout lê do canal já fechado
-	return aggregateErrorsWithTimeout(errChan, 10*time.Second)
+	return firstErr
 }

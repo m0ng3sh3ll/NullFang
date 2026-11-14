@@ -27,7 +27,7 @@ func validateFlags() {
 		"-out": true, "-v": true, "-output": true, "--output": true,
 		// Config & state
 		"-config": true, "-resume": true, "-delta": true,
-		"-threads": true, "-operation-delay": true, "-dir-concurrency": true,
+		"-threads": true, "-operation-delay": true, "-timeout": true,
 		// Admin & web
 		"-check-admin": true, "-web": true, "-web-port": true, "-db": true,
 		// Meta
@@ -109,9 +109,6 @@ func applyStealthMode() {
 
 	// Keep randomized order (default true) — sequential alphabetical is a scanner fingerprint.
 	*noRandomizeFlag = false
-
-	// Keep canary skip (default true) — tripping a canary ends the engagement.
-	*noSkipCanaryFlag = false
 
 	// 500ms max jitter between share mounts (humanBrowseDelay handles per-entry timing).
 	*jitterFlag = 500
@@ -212,10 +209,6 @@ func applyScanConfigFromYAML(patterns *search.SearchPatterns) {
 	if s.Search.MaxDate != "" {
 		*maxDateFlag = s.Search.MaxDate
 	}
-	if s.Search.DirConcurrency > 0 {
-		*dirConcurrencyFlag = s.Search.DirConcurrency
-	}
-
 	// Stealth (YAML)
 	if s.Stealth.OperationDelayMs > 0 {
 		*operationDelayMsFlag = s.Stealth.OperationDelayMs
@@ -229,10 +222,6 @@ func applyScanConfigFromYAML(patterns *search.SearchPatterns) {
 	if s.Stealth.DisableRandomize {
 		*noRandomizeFlag = true
 	}
-	if s.Stealth.DisableCanarySkip {
-		*noSkipCanaryFlag = true
-	}
-
 	// Network
 	if s.Network.SMBDialect != "" {
 		*smbDialectFlag = s.Network.SMBDialect
